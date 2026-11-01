@@ -226,7 +226,7 @@ specifications_*.md
 docs/features/*
 
 # elaborazioni
-./elaborazioni/*
+elaborazioni/*
 
 # cache
 __pycache__
