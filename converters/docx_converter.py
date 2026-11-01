@@ -97,6 +97,40 @@ def _escape_md(text: str) -> str:
     return text
 
 
+def _extract_list_level(style_name: str) -> int:
+    """Estrae il livello di nidificazione dal nome dello stile di lista.
+
+    Analizza il suffisso numerico del nome dello stile per determinare
+    il livello di indentazione.
+
+    Esempi:
+        'List Bullet' → 0
+        'List Bullet 2' → 1
+        'List Bullet 3' → 2
+        'List Number 2' → 1
+        'Custom Bullet 4' → 3
+
+    Args:
+        style_name: Nome dello stile del paragrafo.
+
+    Returns:
+        Livello di nidificazione (0 = principale, 1 = sottolivello, ecc.)
+    """
+    if not style_name:
+        return 0
+
+    # Pattern: nome_stile seguito da spazio e numero
+    # Es. 'List Bullet 2' → livello 1 (2-1), 'List Bullet 3' → livello 2 (3-1)
+    import re
+
+    match = re.search(r'(\d+)$', style_name.strip())
+    if match:
+        level = int(match.group(1)) - 1
+        return max(0, level)  # Clamp a 0 minimo
+
+    return 0
+
+
 def _detect_list(style_name: str):
     """Rileva se un paragrafo è una lista e ne determina tipo e livello.
 
@@ -104,9 +138,11 @@ def _detect_list(style_name: str):
     - Tipo di lista: 'bullet' (non ordinata) o 'number' (ordinata)
     - Livello di nidificazione: 0 = principale, 1 = sottolivello, ecc.
 
-    Stili supportati:
-    - List Bullet, List Bullet 2, List Bullet 3
-    - List Number, List Number 2, List Number 3
+    Supporta:
+    - Stili standard Word con matching case-insensitive:
+      List Bullet, List Bullet 2, List Bullet 3
+      List Number, List Number 2, List Number 3
+    - Stili personalizzati contenenti 'bullet' o 'number' nel nome
 
     Args:
         style_name: Nome dello stile del paragrafo.
@@ -117,18 +153,35 @@ def _detect_list(style_name: str):
     if not style_name:
         return False, None, 0
 
-    # Mappatura stili Word → tipo e livello
-    style_map = {
-        "List Bullet": (True, "bullet", 0),
-        "List Bullet 2": (True, "bullet", 1),
-        "List Bullet 3": (True, "bullet", 2),
-        "List Number": (True, "number", 0),
-        "List Number 2": (True, "number", 1),
-        "List Number 3": (True, "number", 2),
+    style_lower = style_name.lower().strip()
+
+    # Mappatura stili standard Word → tipo e livello (case-insensitive)
+    standard_styles = {
+        "list bullet": 0,
+        "list bullet 2": 1,
+        "list bullet 3": 2,
+        "list number": 0,
+        "list number 2": 1,
+        "list number 3": 2,
     }
 
-    if style_name in style_map:
-        return style_map[style_name]
+    if style_lower in standard_styles:
+        level = standard_styles[style_lower]
+        # Determina il tipo in base alla parola chiave
+        if "bullet" in style_lower:
+            return True, "bullet", level
+        elif "number" in style_lower:
+            return True, "number", level
+
+    # Pattern-based detection per stili personalizzati
+    # Rileva stili contenenti 'bullet' o 'number' seguiti da opzionale numero
+    if "bullet" in style_lower:
+        level = _extract_list_level(style_name)
+        return True, "bullet", level
+
+    if "number" in style_lower:
+        level = _extract_list_level(style_name)
+        return True, "number", level
 
     return False, None, 0
 
@@ -189,7 +242,10 @@ def _extract_toc_field_index(paragraphs) -> int | None:
 def _detect_page_field(para) -> bool:
     """Rileva se un paragrafo contiene un campo PAGE (numero di pagina).
 
-    Cerca elementi XML `w:fldSimple` con istruzione "PAGE".
+    Cerca in tutti gli elementi XML del paragrafo, inclusi:
+    - `w:fldSimple` con istruzione "PAGE"
+    - `w:fldChar` con `instrText` contenente "PAGE"
+    - Varianti con namespace XML diversi
 
     Args:
         para: Oggetto paragrafo python-docx.
@@ -198,13 +254,34 @@ def _detect_page_field(para) -> bool:
         True se il paragrafo contiene un campo PAGE.
     """
     xml = para._element.xml
-    return "PAGE" in xml and ("fldChar" in xml or "fldSimple" in xml)
+    import re
+
+    # Pattern per fldSimple: <w:fldSimple w:instr="PAGE" />
+    page_fldsimple = re.compile(
+        r'<w:fldSimple[^>]*w:instr="PAGE"[^>]*/>',
+        re.IGNORECASE
+    )
+    if page_fldsimple.search(xml):
+        return True
+
+    # Pattern per fldChar con instrText: <w:instrText xml:space="preserve"> PAGE </w:instrText>
+    page_instrtext = re.compile(
+        r'<w:instrText[^>]*>[^<]*PAGE[^<]*</w:instrText>',
+        re.IGNORECASE
+    )
+    if page_instrtext.search(xml):
+        return True
+
+    return False
 
 
 def _detect_numpages_field(para) -> bool:
     """Rileva se un paragrafo contiene un campo NUMPAGES (numero totale pagine).
 
-    Cerca elementi XML `w:fldSimple` con istruzione "NUMPAGES".
+    Cerca in tutti gli elementi XML del paragrafo, inclusi:
+    - `w:fldSimple` con istruzione "NUMPAGES"
+    - `w:fldChar` con `instrText` contenente "NUMPAGES"
+    - Varianti con namespace XML diversi
 
     Args:
         para: Oggetto paragrafo python-docx.
@@ -213,7 +290,25 @@ def _detect_numpages_field(para) -> bool:
         True se il paragrafo contiene un campo NUMPAGES.
     """
     xml = para._element.xml
-    return "NUMPAGES" in xml and ("fldChar" in xml or "fldSimple" in xml)
+    import re
+
+    # Pattern per fldSimple: <w:fldSimple w:instr="NUMPAGES" />
+    numpages_fldsimple = re.compile(
+        r'<w:fldSimple[^>]*w:instr="NUMPAGES"[^>]*/>',
+        re.IGNORECASE
+    )
+    if numpages_fldsimple.search(xml):
+        return True
+
+    # Pattern per fldChar con instrText: <w:instrText xml:space="preserve"> NUMPAGES </w:instrText>
+    numpages_instrtext = re.compile(
+        r'<w:instrText[^>]*>[^<]*NUMPAGES[^<]*</w:instrText>',
+        re.IGNORECASE
+    )
+    if numpages_instrtext.search(xml):
+        return True
+
+    return False
 
 
 def _extract_page_start(section) -> int:
@@ -243,11 +338,34 @@ def _extract_page_start(section) -> int:
     return 1
 
 
+def _extract_current_page_number(doc, section_idx: int = 0) -> int | None:
+    """Tenta di estrarre il numero di pagina iniziale da una sezione.
+
+    python-docx non espone direttamente il numero di pagina corrente.
+    Questo metodo estrae il valore di start da w:pgNum nella sezione.
+
+    Args:
+        doc: Oggetto documento python-docx.
+        section_idx: Indice della sezione corrente.
+
+    Returns:
+        Numero di pagina iniziale, o None se non estrattibile.
+    """
+    try:
+        section = doc.sections[section_idx]
+        return _extract_page_start(section)
+    except (IndexError, ValueError, TypeError, AttributeError):
+        pass
+    return None
+
+
 def _process_page_fields(para, page_offset: int = 0) -> str:
     """Elabora un paragrafo contenente campi PAGE/NUMPAGES e restituisce il testo markdown.
 
-    Sostituisce i campi PAGE con [Pagina N] e NUMPAGES con [di M].
+    Sostituisce i campi PAGE con [Pagina N] e NUMPAGES con [di totali].
     Gestisce combinazioni come "Pagina [N] di [M]".
+    Supporta sia fldSimple che fldChar (con instrText) formats.
+    I campi vengono sostituiti in-posizione nel testo per preservare l'ordine.
 
     Args:
         para: Oggetto paragrafo python-docx.
@@ -259,57 +377,173 @@ def _process_page_fields(para, page_offset: int = 0) -> str:
     xml = para._element.xml
     import re
 
-    # Trova tutti i fldSimple con istruzione PAGE o NUMPAGES
     # Pattern per fldSimple: <w:fldSimple w:instr="PAGE" />
-    page_pattern = re.compile(
-        r'<w:fldSimple[^>]*w:instr="PAGE"[^>]*/>'
+    page_fldsimple = re.compile(
+        r'<w:fldSimple[^>]*w:instr="PAGE"[^>]*/>',
+        re.IGNORECASE
     )
-    numpages_pattern = re.compile(
-        r'<w:fldSimple[^>]*w:instr="NUMPAGES"[^>]*/>'
+    numpages_fldsimple = re.compile(
+        r'<w:fldSimple[^>]*w:instr="NUMPAGES"[^>]*/>',
+        re.IGNORECASE
     )
 
-    has_page = bool(page_pattern.search(xml))
-    has_numpages = bool(numpages_pattern.search(xml))
+    # Pattern per fldChar con instrText - usa \b per word boundary per evitare
+    # che "PAGE" matches "NUMPAGES"
+    page_fldchar_instr = re.compile(
+        r'<w:instrText[^>]*>\s*PAGE\s*</w:instrText>',
+        re.IGNORECASE
+    )
+    numpages_fldchar_instr = re.compile(
+        r'<w:instrText[^>]*>\s*NUMPAGES\s*</w:instrText>',
+        re.IGNORECASE
+    )
+
+    # Rileva presenza di campi (sia fldSimple che fldChar)
+    has_page = bool(page_fldsimple.search(xml) or page_fldchar_instr.search(xml))
+    has_numpages = bool(numpages_fldsimple.search(xml) or numpages_fldchar_instr.search(xml))
 
     if not has_page and not has_numpages:
         return ""
 
-    # Estrai il testo normale (escludendo i campi)
-    # Rimuovi i campi fldSimple dal XML per ottenere il testo rimanente
-    clean_xml = page_pattern.sub("", xml)
-    clean_xml = numpages_pattern.sub("", clean_xml)
-
-    # Estrai il testo dai elementi <w:t>
+    # Estrai tutti gli elementi <w:t> con il loro testo
     text_pattern = re.compile(
         r'<w:t[^>]*>([^<]*)</w:t>'
     )
-    text_parts = text_pattern.findall(clean_xml)
-    normal_text = "".join(text_parts).strip()
+    text_matches = list(text_pattern.finditer(xml))
 
-    # Costruisci il risultato markdown
+    # Costruisci la lista dei segmenti: testo normale e marcatori di campo
+    segments = []  # lista di (tipo, contenuto)
+    last_end = 0
+
+    for match in text_matches:
+        # Aggiungi eventuali campi tra l'elemento <w:t> precedente e questo
+        segment_before = xml[last_end:match.start()]
+        # Controlla se ci sono campi PAGE/NUMPAGES in questo segmento
+        if page_fldsimple.search(segment_before) or page_fldchar_instr.search(segment_before):
+            current_page = page_offset + 1
+            segments.append(('page', f'[Pagina {current_page}]'))
+        if numpages_fldsimple.search(segment_before) or numpages_fldchar_instr.search(segment_before):
+            segments.append(('numpages', '[di totali]'))
+
+        # Aggiungi il testo normale
+        text_content = match.group(1)
+        if text_content:
+            segments.append(('text', text_content))
+
+        last_end = match.end()
+
+    # Controlla eventuali campi dopo l'ultimo elemento <w:t>
+    remaining = xml[last_end:]
+    if page_fldsimple.search(remaining) or page_fldchar_instr.search(remaining):
+        current_page = page_offset + 1
+        segments.append(('page', f'[Pagina {current_page}]'))
+    if numpages_fldsimple.search(remaining) or numpages_fldchar_instr.search(remaining):
+        segments.append(('numpages', '[di totali]'))
+
+    # Unisci tutti i segmenti di testo
     result_parts = []
+    for seg_type, seg_content in segments:
+        result_parts.append(seg_content)
 
-    if normal_text:
-        result_parts.append(normal_text)
-
-    if has_page:
-        current_page = page_offset + 1  # python-docx non espone il valore corrente
-        result_parts.append(f"[Pagina {current_page}]")
-
-    if has_numpages:
-        result_parts.append("[di totali]")  # NUMPAGES non è accessibile direttamente
-
-    return " ".join(result_parts) if result_parts else ""
+    result = "".join(result_parts).strip()
+    return result
 
 
-def _extract_page_info_from_section(section) -> dict:
-    """Estrae le informazioni di numerazione pagina da una sezione.
+def _twips_to_cm(twips: int) -> float:
+    """Converte twips in centimetri.
+
+    1 twip = 1/1440 di pollice
+    1 pollice = 2.54 cm
+    Quindi: 1 twip = 2.54 / 1440 cm ≈ 0.00176389 cm
+
+    Args:
+        twips: Valore in twips.
+
+    Returns:
+        Valore convertito in centimetri (arrotondato a 1 decimale).
+    """
+    return round(twips * 2.54 / 1440, 1)
+
+
+def _extract_page_orientation(section) -> str:
+    """Estrae l'orientamento di pagina da una sezione.
+
+    Legge l'elemento XML `w:orient` nella proprietà della sezione.
+    Default è 'portrait' se non specificato.
 
     Args:
         section: Oggetto sezione python-docx.
 
     Returns:
-        Dict con chiavi 'page_start', 'has_page_field', 'has_numpages_field'.
+        'portrait' o 'landscape'
+    """
+    import re
+
+    try:
+        xml = section._sectPr.xml
+        # Cerca l'elemento <w:orient w:val="landscape"/>
+        orient_match = re.search(r'<w:orient[^>]*/>', xml)
+        if orient_match:
+            val_match = re.search(r'w:val="(\w+)"', orient_match.group(0))
+            if val_match and val_match.group(1) == "landscape":
+                return "landscape"
+        return "portrait"
+    except (ValueError, TypeError, AttributeError):
+        return "portrait"  # Default portrait
+
+
+def _extract_page_margins(section) -> dict:
+    """Estrae i margini di pagina da una sezione.
+
+    Legge l'elemento XML `w:pgMar` e i suoi attributi `w:top`, `w:bottom`,
+    `w:left`, `w:right`, convertendo da twips a centimetri.
+
+    Args:
+        section: Oggetto sezione python-docx.
+
+    Returns:
+        Dict con chiavi 'top', 'bottom', 'left', 'right' in cm.
+    """
+    import re
+
+    margins = {}
+    try:
+        xml = section._sectPr.xml
+
+        # Cerca l'elemento w:pgMar con gli attributi dei margini
+        pgmar_match = re.search(r'<w:pgMar[^>]*/>', xml)
+        if pgmar_match:
+            pgmar_xml = pgmar_match.group(0)
+            for margin_name in ["top", "bottom", "left", "right"]:
+                val_match = re.search(rf'w:{margin_name}="(\d+)"', pgmar_xml)
+                if val_match:
+                    twips = int(val_match.group(1))
+                    margins[margin_name] = _twips_to_cm(twips)
+                else:
+                    margins[margin_name] = 0.0
+        else:
+            margins = {"top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0}
+    except (ValueError, TypeError, AttributeError):
+        margins = {"top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0}
+
+    return margins
+
+
+def _extract_page_info_from_section(section) -> dict:
+    """Estrae le informazioni di pagina da una sezione.
+
+    Estende l'estrazione precedente per includere:
+    - Orientamento (portrait/landscape)
+    - Margini (top, bottom, left, right) in cm
+    - Numero pagina iniziale
+    - Presenza campi PAGE/NUMPAGES
+
+    Args:
+        section: Oggetto sezione python-docx.
+
+    Returns:
+        Dict con chiavi 'page_start', 'has_page_field', 'has_numpages_field',
+        'orientation', 'margins'.
     """
     has_page = False
     has_numpages = False
@@ -338,6 +572,8 @@ def _extract_page_info_from_section(section) -> dict:
         "page_start": _extract_page_start(section),
         "has_page_field": has_page,
         "has_numpages_field": has_numpages,
+        "orientation": _extract_page_orientation(section),
+        "margins": _extract_page_margins(section),
     }
 
 
@@ -513,9 +749,12 @@ def _convert_list(paragraphs) -> str:
 
 
 def _has_content(paragraphs) -> bool:
-    """Verifica se una lista di paragrafi contiene testo non vuoto."""
+    """Verifica se una lista di paragrafi contiene testo non vuoto o campi di pagina."""
     for para in paragraphs:
         if para.text.strip():
+            return True
+        # Controlla anche campi PAGE/NUMPAGES (che non appaiono in para.text)
+        if _detect_page_field(para) or _detect_numpages_field(para):
             return True
     return False
 
@@ -756,6 +995,20 @@ def converti(file_path: str | Path) -> str:
             while len(row_cells) < len(headers):
                 row_cells.append("")
             md_parts.append("| " + " | ".join(row_cells) + " |\n")
+
+    # --- Informazioni di Pagina ---
+    if doc.sections:
+        md_parts.append("\n## Informazioni di Pagina\n")
+        md_parts.append("| Sezione | Orientamento | Margini (cm) | Pagina Iniziale |")
+        md_parts.append("|---------|-------------|--------------|-----------------|")
+        for section_idx, section in enumerate(doc.sections, start=1):
+            page_info = _extract_page_info_from_section(section)
+            orientation = page_info["orientation"]
+            margins = page_info["margins"]
+            margins_str = f"{margins['top']}/{margins['bottom']}/{margins['left']}/{margins['right']}"
+            page_start = page_info["page_start"]
+            md_parts.append(f"| {section_idx} | {orientation} | {margins_str} | {page_start} |")
+        md_parts.append("")
 
     # --- Header e Footer ---
     hf_content = _extract_header_footer(doc)
