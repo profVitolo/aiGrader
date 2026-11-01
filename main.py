@@ -1,15 +1,16 @@
 """AiGrader - Orchestratore principale per la correzione automatica di compiti.
 
 Supporta due modalità:
-- singolo: elabora un compito specifico dato un percorso relativo alla CWD
+- singolo (default): elabora un compito specifico dato un percorso relativo alla CWD
   (es. elaborazioni/4RIM_test_20_06_2026).
 - batch: scansiona la cartella elaborazioni/ per sottocartelle compito e le
   elabora una per una.
 
 Uso:
-    python main.py --singolo "elaborazioni/4RIM_test"  # modalità singolo compito
-    python main.py --batch                             # modalità batch
-    python main.py --help                              # mostra aiuto
+    python main.py "elaborazioni/4RIM_test"  # modalità singolo compito (default)
+    python main.py --batch                   # modalità batch
+    python main.py                           # mostra errore con usage hints
+    python main.py --help                    # mostra aiuto
 """
 
 import argparse
@@ -715,31 +716,52 @@ def _elabora_batch() -> None:
 # --- Argparse ---
 
 def _parse_args() -> argparse.Namespace:
-    """Parsa i parametri da riga di comando."""
+    """Parsa i parametri da riga di comando.
+    
+    Restituisce un namespace con:
+    - cartella_compito: percorso del compito (modalità singolo, default)
+    - batch: flag per modalità batch
+    """
     parser = argparse.ArgumentParser(
         description="AiGrader - Correzione automatica di compiti scolastici.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Esempi:
-  python main.py --singolo "elaborazioni/4RIM - Esercitazione di Google Fogli"  # Elaborazione compito specifico
-  python main.py --batch                                                        # Elaborazione batch di tutti i compiti
+  python main.py "elaborazioni/4RIM - Esercitazione di Google Fogli"  # Elaborazione compito specifico (default)
+  python main.py --batch                                              # Elaborazione batch di tutti i compiti
         """,
     )
 
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
-        "--singolo",
+    parser.add_argument(
+        "cartella_compito",
         type=str,
+        nargs="?",
         metavar="PERCORSO_CARTELLA",
-        help="Elabora un compito specifico (percorso relativo alla CWD, es. elaborazioni/4RIM_test_20_06_2026)",
+        help="Percorso della cartella del compito da elaborare (modalità singolo, default)",
     )
-    group.add_argument(
+    parser.add_argument(
         "--batch",
         action="store_true",
         help="Elabora tutti i compiti nella cartella elaborazioni/",
     )
 
     return parser.parse_args()
+
+
+def _show_usage_error_and_exit() -> None:
+    """Mostra un messaggio di errore chiaro con usage hints e cartelle disponibili."""
+    print("[ERRORE] Argomento mancante. È necessario specificare una cartella del compito o usare --batch.\n")
+    print("Uso corretto:")
+    print(f'  python main.py "elaborazioni/NOME_CARTELLA"   # modalità singolo compito (default)')
+    print(f"  python main.py --batch                         # modalità batch\n")
+    print(f"Cartelle disponibili in {ELABORAZIONI_DIR}/:")
+    if ELABORAZIONI_DIR.exists():
+        for d in sorted(ELABORAZIONI_DIR.iterdir()):
+            if d.is_dir():
+                print(f"  - elaborazioni/{d.name}")
+    else:
+        print(f"  [ATTENZIONE] Cartella {ELABORAZIONI_DIR} non trovata.")
+    sys.exit(1)
 
 
 # --- Entry point ---
@@ -749,32 +771,38 @@ def main() -> None:
     _verifica_dipendenze()
     args = _parse_args()
 
-    if args.singolo:
-        # Il parametro è un percorso relativo alla CWD (es. elaborazioni/4RIM_test)
-        compito_path = Path(args.singolo).resolve()
-        if not compito_path.is_dir():
-            print(f"[ERRORE] Percorso '{args.singolo}' non trovato o non è una cartella.")
-            # Suggerisci percorsi se sembra un nome di cartella in elaborazioni/
-            if not Path(args.singolo).startswith("elaborazioni"):
-                print(f"[INFO] Suggerimento: usa un percorso relativo, es. elaborazioni/{args.singolo}")
-            print(f"[INFO] Cartelle disponibili in {ELABORAZIONI_DIR}/:")
-            if ELABORAZIONI_DIR.exists():
-                for d in sorted(ELABORAZIONI_DIR.iterdir()):
-                    if d.is_dir():
-                        print(f"  - elaborazioni/{d.name}")
-            sys.exit(1)
-        
-        # Cambia BASE_DIR verso la cartella del compito
-        global BASE_DIR, CONSEGNE_DIR, CORREZIONI_DIR
-        BASE_DIR = compito_path
-        CONSEGNE_DIR = BASE_DIR / "consegne"
-        CORREZIONI_DIR = BASE_DIR / "correzioni"
-        
-        _elabora_compito_singolo()
-        # Registra l'elaborazione come completata (usa il nome della cartella)
-        _registra_elaborazione(compito_path.name)
-    elif args.batch:
+    # Se --batch è specificato, esegui modalità batch
+    if args.batch:
         _elabora_batch()
+        return
+
+    # Se non è specificata nessuna cartella, mostra errore con usage hints
+    if not args.cartella_compito:
+        _show_usage_error_and_exit()
+
+    # Il parametro è un percorso relativo alla CWD (es. elaborazioni/4RIM_test)
+    compito_path = Path(args.cartella_compito).resolve()
+    if not compito_path.is_dir():
+        print(f"[ERRORE] Percorso '{args.cartella_compito}' non trovato o non è una cartella.\n")
+        # Suggerisci percorsi se sembra un nome di cartella in elaborazioni/
+        if not args.cartella_compito.startswith("elaborazioni"):
+            print(f"[INFO] Suggerimento: usa un percorso relativo, es. elaborazioni/{args.cartella_compito}")
+        print(f"[INFO] Cartelle disponibili in {ELABORAZIONI_DIR}/:")
+        if ELABORAZIONI_DIR.exists():
+            for d in sorted(ELABORAZIONI_DIR.iterdir()):
+                if d.is_dir():
+                    print(f"  - elaborazioni/{d.name}")
+        sys.exit(1)
+
+    # Cambia BASE_DIR verso la cartella del compito
+    global BASE_DIR, CONSEGNE_DIR, CORREZIONI_DIR
+    BASE_DIR = compito_path
+    CONSEGNE_DIR = BASE_DIR / "consegne"
+    CORREZIONI_DIR = BASE_DIR / "correzioni"
+
+    _elabora_compito_singolo()
+    # Registra l'elaborazione come completata (usa il nome della cartella)
+    _registra_elaborazione(compito_path.name)
 
 
 if __name__ == "__main__":
