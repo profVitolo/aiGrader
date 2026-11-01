@@ -218,3 +218,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Custom files
+## Specification files and spec-flow dir
+.spec-flow
+specifications_*.md
+docs/features/*
+
+# elaborazioni
+./elaborazioni/*
+
+# cache
+__pycache__
+aiGrader/
