@@ -33,19 +33,6 @@ def get_converter(extension: str):
     if not module_path:
         return None
 
-    # Fallback specifico per python-docx non installato
-    if module_path == "converters.docx_converter":
-        try:
-            module = importlib.import_module(module_path)
-            return module.converti
-        except ModuleNotFoundError:
-            def _docx_missing_converter(file_path: str) -> str:
-                return (
-                    "Errore: Modulo python-docx non installato. "
-                    "Eseguire 'pip install python-docx' per abilitare la conversione .docx"
-                )
-            return _docx_missing_converter
-
     # Importa dinamicamente il modulo
     module = importlib.import_module(module_path)
     return module.converti
