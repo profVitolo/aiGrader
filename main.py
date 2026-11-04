@@ -41,14 +41,12 @@ TMP_DIR = None  # Cartella tmp per allegati e markdown convertiti (inizializzata
 def _verifica_dipendenze() -> None:
     """Verifica che i moduli Python richiesti siano installati.
 
-    Controlla la disponibilità di: docx, openpyxl, bs4, openai, aspose.words.
+    Controlla la disponibilità di: openpyxl, openai, aspose.words.
     Per ogni modulo mancante, stampa un warning con le istruzioni di installazione.
     Non interrompe l'esecuzione se un modulo è mancante.
     """
     dipendenze = {
-        "docx": ("python-docx", ".docx"),
         "openpyxl": ("openpyxl", ".xlsx"),
-        "bs4": ("beautifulsoup4", ".html/.htm"),
         "openai": ("openai", "interazione LLM"),
         "aspose.words": ("aspose-words", ".doc"),
     }
