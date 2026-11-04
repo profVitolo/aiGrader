@@ -1,1064 +1,1177 @@
-"""Convertitore Word → Markdown per AiGrader."""
+"""Convertitore DOCX → Markdown strutturato per AiGrader.
 
+Estrae e ricostruisce:
+- Metadati (autore, titolo, data)
+- Intestazioni e piè di pagina per sezione
+- Proprietà di sezione (orientamento, margini, interruzioni)
+- Marcatori di sezione inline nel flusso del testo
+- Interruzioni di pagina e di sezione
+- Note a piè di pagina e note di chiusura (con riferimenti nel testo)
+- Formattazioni inline: grassetto, corsivo, sottolineato, barrato, apice/pedice
+- Elenchi puntati e numerati (con annidamento e numerazione progressiva corretta)
+- Sommari (TOC) riconosciuti e marcati
+- Tabelle ricostruite in Markdown
+- Hyperlink interni ed esterni
+- Stili di paragrafo (Titolo, Sottotitolo, Heading 1-6)
+- Immagini, grafici, forme, oggetti OLE, caselle di testo, video/audio:
+  rilevati e sostituiti con segnaposto testuali (nessun dato binario importato)
+
+Utilizza esclusivamente librerie standard Python.
+"""
+
+import re
+import shutil
+import tempfile
+import zipfile
 from pathlib import Path
-
-import docx
-
-
-def _collect_headings(paragraphs) -> list[dict]:
-    """Raccoglie tutti i titoli del documento con livello e testo.
-
-    Analizza tutti i paragrafi e restituisce una lista di dict con:
-    - 'level': livello dell'intestazione (1-6)
-    - 'text': testo del titolo
-    - 'index': indice del paragrafo nel documento
-
-    Args:
-        paragraphs: Lista di paragrafi del documento.
-
-    Returns:
-        Lista di dict con informazioni sugli heading.
-    """
-    headings = []
-    for idx, para in enumerate(paragraphs):
-        style_name = para.style.name if para.style else ""
-        if style_name.startswith("Heading") or style_name in ("Title", "Subtitle"):
-            level = _heading_level(style_name)
-            # Estrai il testo con formattazione inline
-            formatted_parts = []
-            for run in para.runs:
-                run_text = _format_inline(run)
-                if run_text:
-                    formatted_parts.append(run_text)
-            text = "".join(formatted_parts).strip()
-            if text:
-                headings.append({"level": level, "text": text, "index": idx})
-    return headings
-
-
-def _build_toc_from_headings(headings: list[dict], max_level: int = 3) -> str:
-    """Costruisce una stringa markdown TOC dalla lista di headings.
-
-    Ogni heading viene convertito in un'intestazione markdown con il
-    livello appropriato (#, ##, ###). I livelli superiori a max_level
-    vengono troncati.
-
-    Args:
-        headings: Lista di heading raccolta da _collect_headings.
-        max_level: Livello massimo da includere nel TOC (default 3).
-
-    Returns:
-        Stringa markdown con il sommario formattato.
-    """
-    lines = []
-    lines.append("## Sommario (Table of Contents)")
-    lines.append("")
-
-    for heading in headings:
-        level = min(heading["level"], max_level)
-        indent = "  " * (level - 1)  # 2 spazi per livello di nidificazione
-        lines.append(f"{indent}{'#' * level} {heading['text']}")
-
-    return "\n".join(lines)
-
-
-def _heading_level(style_name: str) -> int:
-    """Determina il livello markdown (#) dallo stile Word.
-
-    Esempi: 'Heading 1' → 1, 'Heading 2' → 2, ecc.
-    'Title' → 1, 'Subtitle' → 2.
-    Se lo stile non è riconoscibile, ritorna 1.
-    """
-    if not style_name:
-        return 1
-
-    style_lower = style_name.lower()
-
-    if style_lower == "title":
-        return 1
-    if style_lower == "subtitle":
-        return 2
-
-    if style_name.startswith("Heading"):
-        try:
-            level = int(style_name.split()[-1])
-            return max(1, min(level, 6))  # Clamp tra 1 e 6
-        except (ValueError, IndexError):
-            return 1
-    return 1
-
-
-def _escape_md(text: str) -> str:
-    """Escape di caratteri speciali markdown per preservare la struttura."""
-    if not text:
-        return ""
-    # Escape pipe nelle celle delle tabelle
-    text = text.replace("|", "\\|")
-    return text
-
-
-def _extract_list_level(style_name: str) -> int:
-    """Estrae il livello di nidificazione dal nome dello stile di lista.
-
-    Analizza il suffisso numerico del nome dello stile per determinare
-    il livello di indentazione.
-
-    Esempi:
-        'List Bullet' → 0
-        'List Bullet 2' → 1
-        'List Bullet 3' → 2
-        'List Number 2' → 1
-        'Custom Bullet 4' → 3
-
-    Args:
-        style_name: Nome dello stile del paragrafo.
-
-    Returns:
-        Livello di nidificazione (0 = principale, 1 = sottolivello, ecc.)
-    """
-    if not style_name:
-        return 0
-
-    # Pattern: nome_stile seguito da spazio e numero
-    # Es. 'List Bullet 2' → livello 1 (2-1), 'List Bullet 3' → livello 2 (3-1)
-    import re
-
-    match = re.search(r'(\d+)$', style_name.strip())
-    if match:
-        level = int(match.group(1)) - 1
-        return max(0, level)  # Clamp a 0 minimo
-
-    return 0
-
-
-def _detect_list(style_name: str):
-    """Rileva se un paragrafo è una lista e ne determina tipo e livello.
-
-    Analizza il nome dello stile Word per determinare:
-    - Tipo di lista: 'bullet' (non ordinata) o 'number' (ordinata)
-    - Livello di nidificazione: 0 = principale, 1 = sottolivello, ecc.
-
-    Supporta:
-    - Stili standard Word con matching case-insensitive:
-      List Bullet, List Bullet 2, List Bullet 3
-      List Number, List Number 2, List Number 3
-    - Stili personalizzati contenenti 'bullet' o 'number' nel nome
-
-    Args:
-        style_name: Nome dello stile del paragrafo.
-
-    Returns:
-        Tuple (is_list: bool, list_type: str | None, list_level: int)
-    """
-    if not style_name:
-        return False, None, 0
-
-    style_lower = style_name.lower().strip()
-
-    # Mappatura stili standard Word → tipo e livello (case-insensitive)
-    standard_styles = {
-        "list bullet": 0,
-        "list bullet 2": 1,
-        "list bullet 3": 2,
-        "list number": 0,
-        "list number 2": 1,
-        "list number 3": 2,
-    }
-
-    if style_lower in standard_styles:
-        level = standard_styles[style_lower]
-        # Determina il tipo in base alla parola chiave
-        if "bullet" in style_lower:
-            return True, "bullet", level
-        elif "number" in style_lower:
-            return True, "number", level
-
-    # Pattern-based detection per stili personalizzati
-    # Rileva stili contenenti 'bullet' o 'number' seguiti da opzionale numero
-    if "bullet" in style_lower:
-        level = _extract_list_level(style_name)
-        return True, "bullet", level
-
-    if "number" in style_lower:
-        level = _extract_list_level(style_name)
-        return True, "number", level
-
-    return False, None, 0
-
-
-def _detect_toc_field(para) -> bool:
-    """Rileva se un paragrafo contiene un campo TOC (Table of Contents).
-
-    Cerca elementi XML `w:fldSimple` o `w:fldChar` con istruzione contenente "TOC".
-
-    Args:
-        para: Oggetto paragrafo python-docx.
-
-    Returns:
-        True se il paragrafo contiene un campo TOC.
-    """
-    xml = para._element.xml
-    return "TOC" in xml and ("fldChar" in xml or "fldSimple" in xml or "instrText" in xml)
-
-
-def _extract_toc_max_level(para) -> int:
-    """Estrae il livello massimo del sommario dal campo TOC.
-
-    Analizza l'opzione ``\\o "min-max"`` del campo TOC per determinare
-    il livello di intestazione più alto incluso.
-
-    Args:
-        para: Oggetto paragrafo python-docx contenente un campo TOC.
-
-    Returns:
-        Livello massimo del sommario (default 3).
-    """
-    import re
-
-    xml = para._element.xml
-    level_match = re.search(r'\\o\s+"\d+-(\d+)"', xml)
-    if level_match:
-        return int(level_match.group(1))
-    return 3
-
-
-def _extract_toc_field_index(paragraphs) -> int | None:
-    """Trova l'indice del paragrafo che contiene il campo TOC.
-
-    Cerca un paragrafo con un campo `w:fldSimple` o `w:fldChar` contenente "TOC".
-
-    Args:
-        paragraphs: Lista di paragrafi del documento.
-
-    Returns:
-        Indice del paragrafo TOC, o None se non trovato.
-    """
-    for idx, para in enumerate(paragraphs):
-        if _detect_toc_field(para):
-            return idx
-    return None
-
-
-def _detect_page_field(para) -> bool:
-    """Rileva se un paragrafo contiene un campo PAGE (numero di pagina).
-
-    Cerca in tutti gli elementi XML del paragrafo, inclusi:
-    - `w:fldSimple` con istruzione "PAGE"
-    - `w:fldChar` con `instrText` contenente "PAGE"
-    - Varianti con namespace XML diversi
-
-    Args:
-        para: Oggetto paragrafo python-docx.
-
-    Returns:
-        True se il paragrafo contiene un campo PAGE.
-    """
-    xml = para._element.xml
-    import re
-
-    # Pattern per fldSimple: <w:fldSimple w:instr="PAGE" />
-    page_fldsimple = re.compile(
-        r'<w:fldSimple[^>]*w:instr="PAGE"[^>]*/>',
-        re.IGNORECASE
-    )
-    if page_fldsimple.search(xml):
-        return True
-
-    # Pattern per fldChar con instrText: <w:instrText xml:space="preserve"> PAGE </w:instrText>
-    page_instrtext = re.compile(
-        r'<w:instrText[^>]*>[^<]*PAGE[^<]*</w:instrText>',
-        re.IGNORECASE
-    )
-    if page_instrtext.search(xml):
-        return True
-
-    return False
-
-
-def _detect_numpages_field(para) -> bool:
-    """Rileva se un paragrafo contiene un campo NUMPAGES (numero totale pagine).
-
-    Cerca in tutti gli elementi XML del paragrafo, inclusi:
-    - `w:fldSimple` con istruzione "NUMPAGES"
-    - `w:fldChar` con `instrText` contenente "NUMPAGES"
-    - Varianti con namespace XML diversi
-
-    Args:
-        para: Oggetto paragrafo python-docx.
-
-    Returns:
-        True se il paragrafo contiene un campo NUMPAGES.
-    """
-    xml = para._element.xml
-    import re
-
-    # Pattern per fldSimple: <w:fldSimple w:instr="NUMPAGES" />
-    numpages_fldsimple = re.compile(
-        r'<w:fldSimple[^>]*w:instr="NUMPAGES"[^>]*/>',
-        re.IGNORECASE
-    )
-    if numpages_fldsimple.search(xml):
-        return True
-
-    # Pattern per fldChar con instrText: <w:instrText xml:space="preserve"> NUMPAGES </w:instrText>
-    numpages_instrtext = re.compile(
-        r'<w:instrText[^>]*>[^<]*NUMPAGES[^<]*</w:instrText>',
-        re.IGNORECASE
-    )
-    if numpages_instrtext.search(xml):
-        return True
-
-    return False
-
-
-def _extract_page_start(section) -> int:
-    """Estrae il numero di pagina iniziale da una sezione.
-
-    Legge l'elemento XML `w:pgNum` nella proprietà della sezione.
-    Default è 1 se non specificato.
-
-    Args:
-        section: Oggetto sezione python-docx.
-
-    Returns:
-        Numero di pagina iniziale (default 1).
-    """
+from typing import Any
+import xml.etree.ElementTree as ET
+
+
+# ── Namespace ──────────────────────────────────────────────
+NS = {
+    "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+    "dc": "http://purl.org/dc/elements/1.1/",
+    "cp": "http://schemas.openxmlformats.org/package/2006/metadata/core-properties",
+    "dcterms": "http://purl.org/dc/terms/",
+    "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "pic": "http://schemas.openxmlformats.org/drawingml/2006/picture",
+    "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+    "dgm": "http://schemas.openxmlformats.org/drawingml/2006/diagram",
+    "v": "urn:schemas-microsoft-com:vml",
+    "o": "urn:schemas-microsoft-com:office:office",
+    "mc": "http://schemas.openxmlformats.org/markup-compatibility/2006",
+    "wps": "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+    "wpg": "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+    "w14": "http://schemas.microsoft.com/office/word/2010/wordml",
+    "m": "http://schemas.openxmlformats.org/officeDocument/2006/math",
+    "wne": "http://schemas.microsoft.com/office/word/2006/wordml",
+}
+
+
+def _q(tag: str) -> str:
+    """Espande un tag 'w:p' in '{namespace}p'."""
+    prefix, local = tag.split(":", 1)
+    return f"{{{NS[prefix]}}}{local}"
+
+
+def _find(el, tag: str):
+    return el.find(_q(tag))
+
+
+def _findall(el, tag: str):
+    return el.findall(_q(tag))
+
+
+def _attr(el, tag: str, attr: str, default=None):
+    if el is None:
+        return default
+    child = _find(el, tag)
+    if child is None:
+        return default
+    return child.get(_q(f"w:{attr}") if ":" not in attr else _q(attr), default)
+
+
+def _num(value: str | None, default: float = 0.0) -> float:
+    """Converte una stringa numerica (intera o decimale) in float."""
+    if value is None or value == "":
+        return default
     try:
-        xml = section._sectPr.xml
-        import re
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
-        # Cerca l'elemento <w:pgNum w:start="N"/>
-        pgnum_match = re.search(r'<w:pgNum[^>]*/>', xml)
-        if pgnum_match:
-            start_match = re.search(r'w:start="(\d+)"', pgnum_match.group(0))
-            if start_match:
-                return int(start_match.group(1))
-    except (ValueError, TypeError, AttributeError):
-        pass
-    return 1
 
-
-def _extract_current_page_number(doc, section_idx: int = 0) -> int | None:
-    """Tenta di estrarre il numero di pagina iniziale da una sezione.
-
-    python-docx non espone direttamente il numero di pagina corrente.
-    Questo metodo estrae il valore di start da w:pgNum nella sezione.
-
-    Args:
-        doc: Oggetto documento python-docx.
-        section_idx: Indice della sezione corrente.
-
-    Returns:
-        Numero di pagina iniziale, o None se non estrattibile.
-    """
-    try:
-        section = doc.sections[section_idx]
-        return _extract_page_start(section)
-    except (IndexError, ValueError, TypeError, AttributeError):
-        pass
-    return None
-
-
-def _process_page_fields(para, page_offset: int = 0) -> str:
-    """Elabora un paragrafo contenente campi PAGE/NUMPAGES e restituisce il testo markdown.
-
-    Sostituisce i campi PAGE con [Pagina N] e NUMPAGES con [di totali].
-    Gestisce combinazioni come "Pagina [N] di [M]".
-    Supporta sia fldSimple che fldChar (con instrText) formats.
-    I campi vengono sostituiti in-posizione nel testo per preservare l'ordine.
-
-    Args:
-        para: Oggetto paragrafo python-docx.
-        page_offset: Offset da aggiungere al numero di pagina (per sezioni con numerazione diversa).
-
-    Returns:
-        Stringa markdown con i campi PAGE/NUMPAGES sostituiti, o stringa vuota se nessun campo.
-    """
-    xml = para._element.xml
-    import re
-
-    # Pattern per fldSimple: <w:fldSimple w:instr="PAGE" />
-    page_fldsimple = re.compile(
-        r'<w:fldSimple[^>]*w:instr="PAGE"[^>]*/>',
-        re.IGNORECASE
-    )
-    numpages_fldsimple = re.compile(
-        r'<w:fldSimple[^>]*w:instr="NUMPAGES"[^>]*/>',
-        re.IGNORECASE
-    )
-
-    # Pattern per fldChar con instrText - usa \b per word boundary per evitare
-    # che "PAGE" matches "NUMPAGES"
-    page_fldchar_instr = re.compile(
-        r'<w:instrText[^>]*>\s*PAGE\s*</w:instrText>',
-        re.IGNORECASE
-    )
-    numpages_fldchar_instr = re.compile(
-        r'<w:instrText[^>]*>\s*NUMPAGES\s*</w:instrText>',
-        re.IGNORECASE
-    )
-
-    # Rileva presenza di campi (sia fldSimple che fldChar)
-    has_page = bool(page_fldsimple.search(xml) or page_fldchar_instr.search(xml))
-    has_numpages = bool(numpages_fldsimple.search(xml) or numpages_fldchar_instr.search(xml))
-
-    if not has_page and not has_numpages:
-        return ""
-
-    # Estrai tutti gli elementi <w:t> con il loro testo
-    text_pattern = re.compile(
-        r'<w:t[^>]*>([^<]*)</w:t>'
-    )
-    text_matches = list(text_pattern.finditer(xml))
-
-    # Costruisci la lista dei segmenti: testo normale e marcatori di campo
-    segments = []  # lista di (tipo, contenuto)
-    last_end = 0
-
-    for match in text_matches:
-        # Aggiungi eventuali campi tra l'elemento <w:t> precedente e questo
-        segment_before = xml[last_end:match.start()]
-        # Controlla se ci sono campi PAGE/NUMPAGES in questo segmento
-        if page_fldsimple.search(segment_before) or page_fldchar_instr.search(segment_before):
-            current_page = page_offset + 1
-            segments.append(('page', f'[Pagina {current_page}]'))
-        if numpages_fldsimple.search(segment_before) or numpages_fldchar_instr.search(segment_before):
-            segments.append(('numpages', '[di totali]'))
-
-        # Aggiungi il testo normale
-        text_content = match.group(1)
-        if text_content:
-            segments.append(('text', text_content))
-
-        last_end = match.end()
-
-    # Controlla eventuali campi dopo l'ultimo elemento <w:t>
-    remaining = xml[last_end:]
-    if page_fldsimple.search(remaining) or page_fldchar_instr.search(remaining):
-        current_page = page_offset + 1
-        segments.append(('page', f'[Pagina {current_page}]'))
-    if numpages_fldsimple.search(remaining) or numpages_fldchar_instr.search(remaining):
-        segments.append(('numpages', '[di totali]'))
-
-    # Unisci tutti i segmenti di testo
-    result_parts = []
-    for seg_type, seg_content in segments:
-        result_parts.append(seg_content)
-
-    result = "".join(result_parts).strip()
-    return result
-
-
-def _twips_to_cm(twips: int) -> float:
-    """Converte twips in centimetri.
-
-    1 twip = 1/1440 di pollice
-    1 pollice = 2.54 cm
-    Quindi: 1 twip = 2.54 / 1440 cm ≈ 0.00176389 cm
-
-    Args:
-        twips: Valore in twips.
-
-    Returns:
-        Valore convertito in centimetri (arrotondato a 1 decimale).
-    """
-    return round(twips * 2.54 / 1440, 1)
-
-
-def _extract_page_orientation(section) -> str:
-    """Estrae l'orientamento di pagina da una sezione.
-
-    Legge l'elemento XML `w:orient` nella proprietà della sezione.
-    Default è 'portrait' se non specificato.
-
-    Args:
-        section: Oggetto sezione python-docx.
-
-    Returns:
-        'portrait' o 'landscape'
-    """
-    import re
-
-    try:
-        xml = section._sectPr.xml
-        # Cerca l'elemento <w:orient w:val="landscape"/>
-        orient_match = re.search(r'<w:orient[^>]*/>', xml)
-        if orient_match:
-            val_match = re.search(r'w:val="(\w+)"', orient_match.group(0))
-            if val_match and val_match.group(1) == "landscape":
-                return "landscape"
-        return "portrait"
-    except (ValueError, TypeError, AttributeError):
-        return "portrait"  # Default portrait
-
-
-def _extract_page_margins(section) -> dict:
-    """Estrae i margini di pagina da una sezione.
-
-    Legge l'elemento XML `w:pgMar` e i suoi attributi `w:top`, `w:bottom`,
-    `w:left`, `w:right`, convertendo da twips a centimetri.
-
-    Args:
-        section: Oggetto sezione python-docx.
-
-    Returns:
-        Dict con chiavi 'top', 'bottom', 'left', 'right' in cm.
-    """
-    import re
-
-    margins = {}
-    try:
-        xml = section._sectPr.xml
-
-        # Cerca l'elemento w:pgMar con gli attributi dei margini
-        pgmar_match = re.search(r'<w:pgMar[^>]*/>', xml)
-        if pgmar_match:
-            pgmar_xml = pgmar_match.group(0)
-            for margin_name in ["top", "bottom", "left", "right"]:
-                val_match = re.search(rf'w:{margin_name}="(\d+)"', pgmar_xml)
-                if val_match:
-                    twips = int(val_match.group(1))
-                    margins[margin_name] = _twips_to_cm(twips)
-                else:
-                    margins[margin_name] = 0.0
-        else:
-            margins = {"top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0}
-    except (ValueError, TypeError, AttributeError):
-        margins = {"top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0}
-
-    return margins
-
-
-def _extract_page_info_from_section(section) -> dict:
-    """Estrae le informazioni di pagina da una sezione.
-
-    Estende l'estrazione precedente per includere:
-    - Orientamento (portrait/landscape)
-    - Margini (top, bottom, left, right) in cm
-    - Numero pagina iniziale
-    - Presenza campi PAGE/NUMPAGES
-
-    Args:
-        section: Oggetto sezione python-docx.
-
-    Returns:
-        Dict con chiavi 'page_start', 'has_page_field', 'has_numpages_field',
-        'orientation', 'margins'.
-    """
-    has_page = False
-    has_numpages = False
-
-    # Controlla header
-    for container_name in ["header", "first_page_header"]:
-        container = getattr(section, container_name, None)
-        if container and container.paragraphs:
-            for para in container.paragraphs:
-                if _detect_page_field(para):
-                    has_page = True
-                if _detect_numpages_field(para):
-                    has_numpages = True
-
-    # Controlla footer
-    for container_name in ["footer", "first_page_footer"]:
-        container = getattr(section, container_name, None)
-        if container and container.paragraphs:
-            for para in container.paragraphs:
-                if _detect_page_field(para):
-                    has_page = True
-                if _detect_numpages_field(para):
-                    has_numpages = True
-
-    return {
-        "page_start": _extract_page_start(section),
-        "has_page_field": has_page,
-        "has_numpages_field": has_numpages,
-        "orientation": _extract_page_orientation(section),
-        "margins": _extract_page_margins(section),
-    }
-
-
-def _format_inline(run) -> str:
-    """Applica la formattazione markdown a un run di testo Word.
-
-    Gestisce bold, italic, strikethrough e underline.
-    Combinazioni multiple (es. bold+italic) sono supportate.
-
-    Args:
-        run: Un oggetto docx.text.run.Run con proprietà di stile.
-
-    Returns:
-        Stringa con la formattazione markdown applicata.
-    """
-    if not run:
-        return ""
-
-    text = run.text
-    if not text:
-        return ""
-
-    # Applica la formattazione markdown
-    # Order matters: strikethrough wraps everything, bold/italic wrap inner
-    if run.bold and run.italic:
-        text = f"***{text}***"
-    elif run.bold:
-        text = f"**{text}**"
-    elif run.italic:
-        text = f"*{text}*"
-
-    # python-docx non ha run.strikethrough: usa run.font.strike
-    if getattr(run.font, "strike", False):
-        text = f"~~{text}~~"
-
-    if getattr(run, "underline", False):
-        # Markdown non ha underline standard: usa HTML
-        text = f"<u>{text}</u>"
-
-    return text
-
-
-def _convert_paragraphs(para_list) -> str:
-    """Converte una lista di paragrafi in testo markdown.
-
-    Usa la stessa logica dei paragrafi principali ma senza rilevamento
-    di heading (gli header/footer usano stili diversi).
-
-    Args:
-        para_list: Lista di oggetti paragrafo da convertire.
-
-    Returns:
-        Stringa markdown con il contenuto dei paragrafi.
-    """
-    parts = []
-    for para in para_list:
-        formatted_parts = []
-        has_content = False
-        for run in para.runs:
-            run_text = _format_inline(run)
-            if run_text:
-                formatted_parts.append(run_text)
-                has_content = True
-
-        if not has_content:
-            continue
-
-        text = "".join(formatted_parts).strip()
-        if not text:
-            continue
-
-        # Negli header/footer, trattiamo gli heading come testo normale
-        # ma preserviamo il livello per coerenza
-        style_name = para.style.name if para.style else ""
-        if style_name.startswith("Heading") or style_name in (
-            "Title",
-            "Subtitle",
-        ):
-            level = _heading_level(style_name)
-            parts.append(f"{'#' * level} {text}")
-        else:
-            parts.append(text)
-
-    return "\n".join(parts)
-
-
-def _convert_table(table, table_label: str = "Tabella") -> str:
-    """Converte una tabella in markdown.
-
-    Args:
-        table: Oggetto tabella python-docx.
-        table_label: Etichetta per la tabella (es. 'Tabella', 'Tabella Header').
-
-    Returns:
-        Stringa markdown con la tabella formattata.
-    """
-    lines = []
-
-    if not table.rows:
-        lines.append(f"*{table_label} vuota.*")
-        return "\n".join(lines)
-
-    # Intestazione tabella (prima riga)
-    headers = []
-    for cell in table.rows[0].cells:
-        headers.append(_escape_md(cell.text.strip()))
-
-    lines.append(f"| {' | '.join(headers)} |")
-    lines.append(f"| {' | '.join(['---'] * len(headers))} |")
-
-    # Righe dati (escludi intestazione)
-    for row in table.rows[1:]:
-        row_cells = []
-        for cell in row.cells:
-            row_cells.append(_escape_md(cell.text.strip()))
-        # Riga vuota se le celle non corrispondono
-        while len(row_cells) < len(headers):
-            row_cells.append("")
-        lines.append(f"| {' | '.join(row_cells)} |")
-
-    return "\n".join(lines)
-
-
-def _convert_list(paragraphs) -> str:
-    """Converte una sequenza di paragrafi di lista in markdown.
-
-    Gestisce:
-    - Liste non ordinate (bullet points) con '- '
-    - Liste ordinate con '1. ', '2. ', ecc.
-    - Liste nidificate con indentazione di 2 spazi per livello
-    - Numerazione automatica per liste ordinate
-
-    Args:
-        paragraphs: Lista di oggetti paragrafo che formano una lista continua.
-
-    Returns:
-        Stringa markdown con la lista formattata.
-    """
-    lines = []
-    number_counters = {}  # track counters per livello di lista ordinata
-
-    for para in paragraphs:
-        style_name = para.style.name if para.style else ""
-        is_list, list_type, list_level = _detect_list(style_name)
-
-        if not is_list:
-            break  # Fine della lista
-
-        # Formatta il testo con stili inline
-        formatted_parts = []
-        for run in para.runs:
-            run_text = _format_inline(run)
-            if run_text:
-                formatted_parts.append(run_text)
-
-        text = "".join(formatted_parts).strip()
-        if not text:
-            continue
-
-        # Crea il prefisso per la lista
-        indent = "  " * list_level  # 2 spazi per livello
-
-        if list_type == "bullet":
-            lines.append(f"{indent}- {text}")
-        elif list_type == "number":
-            # Incrementa il contatore per questo livello
-            if list_level not in number_counters:
-                number_counters[list_level] = 0
-            number_counters[list_level] += 1
-            lines.append(f"{indent}{number_counters[list_level]}. {text}")
-
-    return "\n".join(lines)
-
-
-def _has_content(paragraphs) -> bool:
-    """Verifica se una lista di paragrafi contiene testo non vuoto o campi di pagina."""
-    for para in paragraphs:
-        if para.text.strip():
-            return True
-        # Controlla anche campi PAGE/NUMPAGES (che non appaiono in para.text)
-        if _detect_page_field(para) or _detect_numpages_field(para):
-            return True
-    return False
-
-
-def _extract_header_footer(doc) -> str:
-    """Estrae header e footer da tutte le sezioni del documento.
-
-    Gestisce:
-    - Sezioni multiple con header/footer diversi
-    - differentFirstPage (prima pagina diversa)
-    - Paragrafi e tabelle negli header/footer
-    - Campi PAGE e NUMPAGES per numeri di pagina
-
-    Args:
-        doc: Oggetto documento python-docx.
-
-    Returns:
-        Stringa markdown con header e footer, o stringa vuota se nessuno.
-    """
-    sections = doc.sections
-    if not sections:
-        return ""
-
-    output_parts = []
-
-    for section_idx, section in enumerate(sections, start=1):
-        # Estrai info numerazione pagina per questa sezione
-        page_info = _extract_page_info_from_section(section)
-        page_offset = page_info["page_start"] - 1
-
-        # Header principale
-        hdr = section.header
-        if hdr and hdr.paragraphs and _has_content(hdr.paragraphs):
-            output_parts.append(f"\n<!-- Header Sezione {section_idx} -->\n---\n")
-            header_lines = []
-            for para in hdr.paragraphs:
-                # Controlla se contiene campi PAGE/NUMPAGES
-                page_text = _process_page_fields(para, page_offset)
-                if page_text:
-                    header_lines.append(page_text)
-                else:
-                    # Altrimenti converti come paragrafo normale
-                    content = _convert_paragraphs([para])
-                    if content:
-                        header_lines.append(content)
-            if header_lines:
-                output_parts.append("\n".join(header_lines))
-
-        # Header prima pagina diversa (se differentFirstPage)
-        if section.different_first_page_header_footer and section.first_page_header:
-            hdr_first = section.first_page_header
-            if hdr_first and hdr_first.paragraphs and _has_content(hdr_first.paragraphs):
-                output_parts.append(
-                    f"\n<!-- Header Prima Pagina Sezione {section_idx} -->\n---\n"
-                )
-                header_lines = []
-                for para in hdr_first.paragraphs:
-                    page_text = _process_page_fields(para, page_offset)
-                    if page_text:
-                        header_lines.append(page_text)
-                    else:
-                        content = _convert_paragraphs([para])
-                        if content:
-                            header_lines.append(content)
-                if header_lines:
-                    output_parts.append("\n".join(header_lines))
-
-        # Footer principale
-        ftr = section.footer
-        if ftr and ftr.paragraphs and _has_content(ftr.paragraphs):
-            output_parts.append(f"\n<!-- Footer Sezione {section_idx} -->\n---\n")
-            footer_lines = []
-            for para in ftr.paragraphs:
-                page_text = _process_page_fields(para, page_offset)
-                if page_text:
-                    footer_lines.append(page_text)
-                else:
-                    content = _convert_paragraphs([para])
-                    if content:
-                        footer_lines.append(content)
-            if footer_lines:
-                output_parts.append("\n".join(footer_lines))
-
-        # Footer prima pagina diversa (se differentFirstPage)
-        if section.different_first_page_header_footer and section.first_page_footer:
-            ftr_first = section.first_page_footer
-            if ftr_first and ftr_first.paragraphs and _has_content(ftr_first.paragraphs):
-                output_parts.append(
-                    f"\n<!-- Footer Prima Pagina Sezione {section_idx} -->\n---\n"
-                )
-                footer_lines = []
-                for para in ftr_first.paragraphs:
-                    page_text = _process_page_fields(para, page_offset)
-                    if page_text:
-                        footer_lines.append(page_text)
-                    else:
-                        content = _convert_paragraphs([para])
-                        if content:
-                            footer_lines.append(content)
-                if footer_lines:
-                    output_parts.append("\n".join(footer_lines))
-
-    return "\n".join(output_parts)
-
+# ── Conversione principale ──────────────────────────────────
 
 def converti(file_path: str | Path) -> str:
-    """Converte un documento Word (.docx) in una stringa Markdown.
-
-    Gestisce paragrafi, titoli (Heading 1-6), tabelle e segnala immagini.
-
-    Args:
-        file_path: Percorso al file Word (.docx).
-
-    Returns:
-        Stringa Markdown con il contenuto del documento.
-
-    Raises:
-        IOError: Se il file non esiste, non è leggibile, o è corrotto.
-    """
+    """Converte un DOCX in Markdown strutturato."""
     file_path = Path(file_path)
 
-    # --- Validazione file ---
+    # Validazione
     if not file_path.exists():
         raise IOError(f"File non trovato: {file_path}")
-
     if not file_path.is_file():
         raise IOError(f"Percorso non è un file: {file_path}")
+    if file_path.suffix.lower() != ".docx":
+        raise IOError(f"Formato non supportato: {file_path.suffix}. Supportati solo .docx.")
 
     try:
-        doc = docx.Document(str(file_path))
+        with open(file_path, "rb") as f:
+            header = f.read(4)
+        if header[:2] != b"PK":
+            raise IOError(f"File non valido: {file_path} (header ZIP non riconosciuto)")
+    except IOError:
+        raise
     except Exception as exc:
-        raise IOError(
-            f"Impossibile aprire il documento Word: {file_path} — {exc}"
-        ) from exc
+        raise IOError(f"Impossibile leggere il file: {file_path} — {exc}") from exc
 
-    md_parts: list[str] = []
-
-    # --- Intestazione ---
-    md_parts.append("# Documento Word\n")
-
-    # --- Rileva TOC e raccoglie headings ---
-    toc_index = _extract_toc_field_index(doc.paragraphs)
-    all_headings = _collect_headings(doc.paragraphs)
-    toc_max_level = 3
-    if toc_index is not None:
-        toc_max_level = _extract_toc_max_level(doc.paragraphs[toc_index])
-
-    # --- Paragrafi e Liste ---
-    i = 0
-    while i < len(doc.paragraphs):
-        para = doc.paragraphs[i]
-        style_name = para.style.name if para.style else ""
-
-        # Controlla se è un heading
-        if style_name.startswith("Heading") or style_name in (
-            "Title",
-            "Subtitle",
-        ):
-            # Costruisci il testo con formattazione inline
-            formatted_parts = []
-            for run in para.runs:
-                run_text = _format_inline(run)
-                if run_text:
-                    formatted_parts.append(run_text)
-            text = "".join(formatted_parts).strip()
-            if text:
-                level = _heading_level(style_name)
-                md_parts.append(f"\n{'#' * level} {text}\n")
-            i += 1
-            continue
-
-        # Controlla se è una lista
-        is_list, list_type, list_level = _detect_list(style_name)
-        if is_list:
-            # Raccogli tutti i paragrafi della lista
-            list_paragraphs = []
-            while i < len(doc.paragraphs):
-                p = doc.paragraphs[i]
-                s = p.style.name if p.style else ""
-                in_list, _, _ = _detect_list(s)
-                if in_list:
-                    list_paragraphs.append(p)
-                    i += 1
-                else:
-                    break
-
-            # Converti la lista in markdown
-            list_md = _convert_list(list_paragraphs)
-            if list_md:
-                md_parts.append(f"\n{list_md}\n")
-            continue
-
-        # Controlla se è un campo TOC
-        if toc_index is not None and i == toc_index:
-            # Inserisci il sommario generato dagli headings
-            toc_md = _build_toc_from_headings(all_headings, max_level=toc_max_level)
-            md_parts.append(f"\n{toc_md}\n")
-            i += 1
-            continue
-
-        # Paragrafo normale
-        formatted_parts = []
-        has_content = False
-        for run in para.runs:
-            run_text = _format_inline(run)
-            if run_text:
-                formatted_parts.append(run_text)
-                has_content = True
-
-        if has_content:
-            text = "".join(formatted_parts).strip()
-            if text:
-                md_parts.append(f"\n{text}\n")
-        i += 1
-
-    # --- Tabelle ---
-    for table_idx, table in enumerate(doc.tables, start=1):
-        md_parts.append(f"\n### Tabella {table_idx}\n")
-
-        if not table.rows:
-            md_parts.append("*Tabella vuota.*\n")
-            continue
-
-        # Intestazione tabella (prima riga)
-        headers = []
-        for cell in table.rows[0].cells:
-            headers.append(_escape_md(cell.text.strip()))
-
-        md_parts.append("| " + " | ".join(headers) + " |\n")
-        md_parts.append("| " + " | ".join(["---"] * len(headers)) + " |\n")
-
-        # Righe dati (escludi intestazione)
-        for row in table.rows[1:]:
-            row_cells = []
-            for cell in row.cells:
-                row_cells.append(_escape_md(cell.text.strip()))
-            # Riga vuota se le celle non corrispondono
-            while len(row_cells) < len(headers):
-                row_cells.append("")
-            md_parts.append("| " + " | ".join(row_cells) + " |\n")
-
-    # --- Informazioni di Pagina ---
-    if doc.sections:
-        md_parts.append("\n## Informazioni di Pagina\n")
-        md_parts.append("| Sezione | Orientamento | Margini (cm) | Pagina Iniziale |")
-        md_parts.append("|---------|-------------|--------------|-----------------|")
-        for section_idx, section in enumerate(doc.sections, start=1):
-            page_info = _extract_page_info_from_section(section)
-            orientation = page_info["orientation"]
-            margins = page_info["margins"]
-            margins_str = f"{margins['top']}/{margins['bottom']}/{margins['left']}/{margins['right']}"
-            page_start = page_info["page_start"]
-            md_parts.append(f"| {section_idx} | {orientation} | {margins_str} | {page_start} |")
-        md_parts.append("")
-
-    # --- Header e Footer ---
-    hf_content = _extract_header_footer(doc)
-    if hf_content:
-        md_parts.append(f"\n---\n\n## Header e Footer\n\n{hf_content}")
-
-    # --- Immagini ---
-    # python-docx non estrae immagini, ma possiamo rilevare la presenza
-    # di elementi inline (shapes, pictures) nei paragrafi
-    image_count = 0
-    for para in doc.paragraphs:
-        for run in para.runs:
-            # Controlla se il run contiene elementi inline
-            if run._element.findall(
-                ".//{http://schemas.openxmlformats.org/drawingml/2006/"
-                "wordprocessingDrawing}wp:xdr:xdrPic"
-            ):
-                image_count += 1
-
-    # Controlla anche negli header/footer
+    temp_dir = None
     try:
-        for section in doc.sections:
-            hdr = section.header
-            if hdr and hdr.paragraphs:
-                for para in hdr.paragraphs:
-                    for run in para.runs:
-                        if run._element.findall(
-                            ".//{http://schemas.openxmlformats.org/drawingml/2006/"
-                            "wordprocessingDrawing}wp:xdr:xdrPic"
-                        ):
-                            image_count += 1
-            ftr = section.footer
-            if ftr and ftr.paragraphs:
-                for para in ftr.paragraphs:
-                    for run in para.runs:
-                        if run._element.findall(
-                            ".//{http://schemas.openxmlformats.org/drawingml/2006/"
-                            "wordprocessingDrawing}wp:xdr:xdrPic"
-                        ):
-                            image_count += 1
+        temp_dir = tempfile.mkdtemp(prefix="aigrader_docx_")
+        extract_dir = Path(temp_dir)
+
+        with zipfile.ZipFile(file_path, "r") as z:
+            z.extractall(extract_dir)
+
+        ctx = _DocContext(extract_dir)
+        return ctx.build_markdown()
+
+    except IOError:
+        raise
+    except Exception as exc:
+        raise IOError(f"Errore durante la conversione di {file_path}: {exc}") from exc
+    finally:
+        if temp_dir and Path(temp_dir).exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+# ── Contesto del documento ──────────────────────────────────
+
+class _DocContext:
+    """Carica e organizza tutte le risorse del DOCX."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.word = root / "word"
+        self.doc_xml = self.word / "document.xml"
+        self.styles = self._parse_styles()
+        self.numbering = self._parse_numbering()
+        self.footnotes = self._parse_footnotes()
+        self.endnotes = self._parse_endnotes()
+        self.headers = self._index_part("header")
+        self.footers = self._index_part("footer")
+        self.rels = self._parse_rels()
+        self.core_props = self._parse_core_props()
+        self.media_index = self._index_media()
+
+        # Stato del walk
+        self._section_index = 0
+        self._section_props_seen: list[dict[str, Any]] = []
+        self._toc_index = 0
+        self._list_counters: dict[tuple[str, int], int] = {}
+        self._object_counts: dict[str, int] = {}
+        self._objects_seen: list[dict[str, Any]] = []
+
+    # ── Risorse ─────────────────────────────────────────────
+
+    def _parse_styles(self) -> dict[str, dict[str, Any]]:
+        path = self.word / "styles.xml"
+        result: dict[str, dict[str, Any]] = {}
+        if not path.exists():
+            return result
+        try:
+            tree = ET.parse(path)
+        except ET.ParseError:
+            return result
+        for style in _findall(tree.getroot(), "w:style"):
+            sid = style.get(_q("w:styleId"))
+            if not sid:
+                continue
+            name_el = _find(style, "w:name")
+            name = name_el.get(_q("w:val"), sid) if name_el is not None else sid
+            based_on = _find(style, "w:basedOn")
+            result[sid] = {
+                "name": name,
+                "basedOn": based_on.get(_q("w:val")) if based_on is not None else None,
+                "isHeading": name.lower().startswith(("heading", "title", "subtitle")),
+            }
+        return result
+
+    def _parse_numbering(self) -> dict[str, Any]:
+        path = self.word / "numbering.xml"
+        result: dict[str, Any] = {"nums": {}, "abstracts": {}}
+        if not path.exists():
+            return result
+        try:
+            tree = ET.parse(path)
+        except ET.ParseError:
+            return result
+        root = tree.getroot()
+
+        for absn in _findall(root, "w:abstractNum"):
+            aid = absn.get(_q("w:abstractNumId"))
+            if not aid:
+                continue
+            levels: dict[str, dict[str, Any]] = {}
+            for lvl in _findall(absn, "w:lvl"):
+                ilvl = lvl.get(_q("w:ilvl"), "0")
+                levels[ilvl] = {
+                    "numFmt": _attr(lvl, "w:numFmt", "w:val", "decimal"),
+                    "lvlText": _attr(lvl, "w:lvlText", "w:val", ""),
+                    "start": int(_num(_attr(lvl, "w:start", "w:val", "1"), 1)),
+                }
+            result["abstracts"][aid] = levels
+
+        for num in _findall(root, "w:num"):
+            nid = num.get(_q("w:numId"))
+            aid_el = _find(num, "w:abstractNumId")
+            if nid and aid_el is not None:
+                result["nums"][nid] = aid_el.get(_q("w:val"))
+        return result
+
+    def _parse_footnotes(self) -> dict[str, dict[str, Any]]:
+        path = self.word / "footnotes.xml"
+        result: dict[str, dict[str, Any]] = {}
+        if not path.exists():
+            return result
+        try:
+            tree = ET.parse(path)
+        except ET.ParseError:
+            return result
+        for fn in _findall(tree.getroot(), "w:footnote"):
+            fid = fn.get(_q("w:id"))
+            if fid is None:
+                continue
+            result[fid] = {
+                "type": fn.get(_q("w:type"), ""),
+                "text": _extract_plain_text(fn),
+            }
+        return result
+
+    def _parse_endnotes(self) -> dict[str, dict[str, Any]]:
+        path = self.word / "endnotes.xml"
+        result: dict[str, dict[str, Any]] = {}
+        if not path.exists():
+            return result
+        try:
+            tree = ET.parse(path)
+        except ET.ParseError:
+            return result
+        for en in _findall(tree.getroot(), "w:endnote"):
+            eid = en.get(_q("w:id"))
+            if eid is None:
+                continue
+            result[eid] = {
+                "type": en.get(_q("w:type"), ""),
+                "text": _extract_plain_text(en),
+            }
+        return result
+
+    def _index_part(self, prefix: str) -> dict[str, Path]:
+        result: dict[str, Path] = {}
+        if not self.word.exists():
+            return result
+        for f in self.word.iterdir():
+            if f.is_file() and f.suffix.lower() == ".xml" and f.name.startswith(prefix):
+                m = re.search(r"(\d+)\.xml$", f.name)
+                if m:
+                    result[m.group(1)] = f
+        return result
+
+    def _index_media(self) -> dict[str, Path]:
+        """Mappa nome file media (es. 'image1.png') → Path."""
+        result: dict[str, Path] = {}
+        media = self.word / "media"
+        if not media.exists():
+            return result
+        for f in media.iterdir():
+            if f.is_file():
+                result[f.name] = f
+        return result
+
+    def _parse_rels(self) -> dict[str, str]:
+        path = self.word / "_rels" / "document.xml.rels"
+        result: dict[str, str] = {}
+        if not path.exists():
+            return result
+        try:
+            tree = ET.parse(path)
+        except ET.ParseError:
+            return result
+        for rel in tree.getroot():
+            rid = rel.get("Id")
+            target = rel.get("Target")
+            if rid and target:
+                result[rid] = target
+        return result
+
+    def _parse_core_props(self) -> dict[str, str]:
+        path = self.root / "docProps" / "core.xml"
+        result: dict[str, str] = {}
+        if not path.exists():
+            return result
+        try:
+            tree = ET.parse(path)
+        except ET.ParseError:
+            return result
+        root = tree.getroot()
+        for key, tag in [
+            ("author", f"{{{NS['dc']}}}creator"),
+            ("title", f"{{{NS['dc']}}}title"),
+            ("subject", f"{{{NS['dc']}}}subject"),
+            ("created", f"{{{NS['dcterms']}}}created"),
+            ("modified", f"{{{NS['dcterms']}}}modified"),
+        ]:
+            el = root.find(tag)
+            if el is not None and el.text:
+                result[key] = el.text.strip()
+        return result
+
+    # ── Header/footer ──────────────────────────────────────
+
+    def _resolve_header_footer(self, rid: str) -> Path | None:
+        target = self.rels.get(rid)
+        if not target:
+            return None
+        path = self.word / target
+        return path if path.exists() else None
+
+    def _read_header_footer_text(self, path: Path) -> str:
+        if not path.exists():
+            return ""
+        try:
+            tree = ET.parse(path)
+        except ET.ParseError:
+            return ""
+        lines = []
+        for p in _findall(tree.getroot(), "w:p"):
+            text = _extract_plain_text(p)
+            if text.strip():
+                lines.append(text.strip())
+        return " ".join(lines)
+
+    def _extract_section_props(self, sectPr) -> dict[str, Any]:
+        props: dict[str, Any] = {}
+        if sectPr is None:
+            return props
+
+        pg_sz = _find(sectPr, "w:pgSz")
+        if pg_sz is not None:
+            props["width_twips"] = _num(pg_sz.get(_q("w:w")))
+            props["height_twips"] = _num(pg_sz.get(_q("w:h")))
+            props["orientation"] = pg_sz.get(_q("w:orient"), "portrait")
+
+        pg_mar = _find(sectPr, "w:pgMar")
+        if pg_mar is not None:
+            props["margins_twips"] = {
+                "top": _num(pg_mar.get(_q("w:top"))),
+                "bottom": _num(pg_mar.get(_q("w:bottom"))),
+                "left": _num(pg_mar.get(_q("w:left"))),
+                "right": _num(pg_mar.get(_q("w:right"))),
+                "header": _num(pg_mar.get(_q("w:header"))),
+                "footer": _num(pg_mar.get(_q("w:footer"))),
+            }
+
+        hdr_default = _find(sectPr, "w:headerReference")
+        if hdr_default is not None:
+            rid = hdr_default.get(_q("r:id"))
+            path = self._resolve_header_footer(rid) if rid else None
+            if path:
+                text = self._read_header_footer_text(path)
+                if text:
+                    props["header_text"] = text
+                    props["header_file"] = path.name
+
+        ftr_default = _find(sectPr, "w:footerReference")
+        if ftr_default is not None:
+            rid = ftr_default.get(_q("r:id"))
+            path = self._resolve_header_footer(rid) if rid else None
+            if path:
+                text = self._read_header_footer_text(path)
+                if text:
+                    props["footer_text"] = text
+                    props["footer_file"] = path.name
+
+        type_el = _find(sectPr, "w:type")
+        if type_el is not None:
+            props["section_type"] = type_el.get(_q("w:val"), "nextPage")
+
+        return props
+
+    def _format_section_marker(self, props: dict[str, Any], index: int) -> str:
+        lines = [f"> **── SEZIONE {index} ──**"]
+        bits: list[str] = []
+        if props.get("orientation"):
+            bits.append(f"orientamento **{props['orientation']}**")
+        if props.get("width_twips") and props.get("height_twips"):
+            w = props["width_twips"] / 567.0
+            h = props["height_twips"] / 567.0
+            bits.append(f"pagina {w:.2f}×{h:.2f} cm")
+        if props.get("margins_twips"):
+            m = props["margins_twips"]
+            bits.append(
+                f"margini T{m['top']/567:.2f} B{m['bottom']/567:.2f} "
+                f"L{m['left']/567:.2f} R{m['right']/567:.2f} cm"
+            )
+        if props.get("section_type"):
+            bits.append(f"interruzione `{props['section_type']}`")
+        if bits:
+            lines.append("> " + " · ".join(bits))
+        if props.get("header_text"):
+            lines.append(f"> **Intestazione:** {props['header_text']}")
+        if props.get("footer_text"):
+            lines.append(f"> **Piè di pagina:** {props['footer_text']}")
+        return "\n".join(lines)
+
+    # ── Oggetti incorporati (immagini, grafici, forme, OLE, ecc.) ──
+
+    def _resolve_media_target(self, rid: str | None) -> str | None:
+        """Ritorna il nome del file media (es. 'image1.png') da un r:embed/r:id."""
+        if not rid:
+            return None
+        target = self.rels.get(rid)
+        if not target:
+            return None
+        # target tipo 'media/image1.png' o 'media/chart1.xml'
+        name = target.split("/")[-1]
+        return name
+
+    def _media_info(self, name: str | None) -> str:
+        """Ritorna 'nome (size KB)' se il file esiste."""
+        if not name:
+            return ""
+        path = self.media_index.get(name)
+        if path and path.exists():
+            try:
+                size = path.stat().st_size
+                return f"{name}, {size/1024:.1f} KB"
+            except OSError:
+                pass
+        return name
+
+    def _register_object(
+        self,
+        kind: str,
+        rid: str | None,
+        name: str | None,
+        extra: dict[str, Any] | None = None,
+    ) -> str:
+        """Registra un oggetto e restituisce il segnaposto Markdown."""
+        self._object_counts[kind] = self._object_counts.get(kind, 0) + 1
+        idx = self._object_counts[kind]
+
+        media_name = self._resolve_media_target(rid)
+        media_info = self._media_info(media_name)
+
+        record: dict[str, Any] = {
+            "kind": kind,
+            "index": idx,
+            "rid": rid,
+            "media_name": media_name,
+            "docPr_name": name,
+            "extra": extra or {},
+        }
+        self._objects_seen.append(record)
+
+        # Costruzione segnaposto
+        label = {
+            "image": "🖼️ Immagine",
+            "chart": "📊 Grafico",
+            "diagram": "🧩 Diagramma SmartArt",
+            "shape": "🔷 Forma",
+            "textbox": "📝 Casella di testo",
+            "ole": "📦 Oggetto OLE",
+            "video": "🎬 Video",
+            "audio": "🔊 Audio",
+            "group": "🔗 Gruppo di forme",
+            "unknown": "❓ Oggetto",
+        }.get(kind, "❓ Oggetto")
+
+        parts = [f"[{label} {kind}#{idx}"]
+        if name:
+            parts.append(f" \"{name}\"")
+        if media_info:
+            parts.append(f" file={media_info}")
+        if rid:
+            parts.append(f" r:id={rid}")
+        if extra:
+            for k, v in extra.items():
+                if v not in (None, "", 0):
+                    parts.append(f" {k}={v}")
+        parts.append("]")
+        return " ".join(parts)
+
+    def _scan_run_for_objects(self, r, footnote_refs: list[str]) -> str:
+        """Cerca oggetti incorporati dentro un run (drawing, pict, object, ecc.)."""
+        parts: list[str] = []
+
+        for child in r:
+            tag = child.tag
+
+            # ── DrawingML (w:drawing) ──
+            if tag == _q("w:drawing"):
+                parts.append(self._handle_drawing(child))
+
+            # ── VML legacy (w:pict) ──
+            elif tag == _q("w:pict"):
+                parts.append(self._handle_vml_pict(child))
+
+            # ── Oggetto OLE (w:object) ──
+            elif tag == _q("w:object"):
+                parts.append(self._handle_ole(child))
+
+            # ── mc:AlternateContent (fallback moderno/legacy) ──
+            elif tag == f"{{{NS['mc']}}}AlternateContent":
+                parts.append(self._handle_alternate_content(child))
+
+        return "".join(parts)
+
+    def _handle_alternate_content(self, ac) -> str:
+        """mc:AlternateContent contiene Choice (moderno) e Fallback (legacy).
+
+        Preferiamo il Choice per non duplicare il segnaposto.
+        """
+        choice = ac.find(f"{{{NS['mc']}}}Choice")
+        if choice is not None:
+            out: list[str] = []
+            for child in choice.iter():
+                if child.tag == _q("w:drawing"):
+                    out.append(self._handle_drawing(child))
+                elif child.tag == _q("w:pict"):
+                    out.append(self._handle_vml_pict(child))
+                elif child.tag == _q("w:object"):
+                    out.append(self._handle_ole(child))
+            if out:
+                return " ".join(out)
+        # Fallback
+        fallback = ac.find(f"{{{NS['mc']}}}Fallback")
+        if fallback is not None:
+            for child in fallback.iter():
+                if child.tag == _q("w:pict"):
+                    return self._handle_vml_pict(child)
+        return ""
+
+    def _handle_drawing(self, drawing) -> str:
+        """Analizza un w:drawing e produce segnaposto."""
+        segments: list[str] = []
+
+        # wp:inline / wp:anchor
+        inline = drawing.find(f"{{{NS['wp']}}}inline")
+        anchor = drawing.find(f"{{{NS['wp']}}}anchor")
+        container = inline if inline is not None else anchor
+
+        # docPr: nome, id, descr
+        docpr_name = None
+        docpr_descr = None
+        if container is not None:
+            docpr = container.find(f"{{{NS['wp']}}}docPr")
+            if docpr is not None:
+                docpr_name = docpr.get("name") or docpr.get("title")
+                docpr_descr = docpr.get("descr")
+
+        # Layout (dimensioni)
+        size_cm = None
+        if container is not None:
+            ext = container.find(f"{{{NS['wp']}}}extent")
+            if ext is not None:
+                cx = _num(ext.get("cx"), 0)
+                cy = _num(ext.get("cy"), 0)
+                if cx and cy:
+                    # EMU → cm (1 cm = 360000 EMU)
+                    size_cm = f"{cx/360000:.2f}×{cy/360000:.2f} cm"
+
+        # Picture (a:blip r:embed)
+        blip = drawing.find(f".//{{{NS['a']}}}blip")
+        if blip is not None:
+            rid = blip.get(f"{{{NS['r']}}}embed") or blip.get(f"{{{NS['r']}}}link")
+            extra = {}
+            if size_cm:
+                extra["dim"] = size_cm
+            if docpr_descr:
+                extra["alt"] = f'"{docpr_descr}"'
+            return self._register_object("image", rid, docpr_name, extra)
+
+        # Grafico (c:chart r:id)
+        chart_ref = drawing.find(f".//{{{NS['c']}}}chart")
+        if chart_ref is not None:
+            rid = chart_ref.get(f"{{{NS['r']}}}id")
+            extra = {"dim": size_cm} if size_cm else {}
+            return self._register_object("chart", rid, docpr_name, extra)
+
+        # SmartArt (dgm:relIds)
+        diagram = drawing.find(f".//{{{NS['dgm']}}}relIds")
+        if diagram is not None:
+            rid = diagram.get(f"{{{NS['r']}}}dm")
+            extra = {"dim": size_cm} if size_cm else {}
+            return self._register_object("diagram", rid, docpr_name, extra)
+
+        # Forma (wps:wsp)
+        shape = drawing.find(f".//{{{NS['wps']}}}wsp")
+        if shape is not None:
+            # Testo dentro la forma
+            text_el = shape.find(f".//{{{NS['w']}}}t")
+            shape_text = text_el.text if text_el is not None and text_el.text else ""
+            extra = {}
+            if shape_text:
+                extra["text"] = f'"{shape_text}"'
+            if size_cm:
+                extra["dim"] = size_cm
+            return self._register_object("shape", None, docpr_name, extra)
+
+        # Gruppo (wpg:wgp)
+        group = drawing.find(f".//{{{NS['wpg']}}}wgp")
+        if group is not None:
+            extra = {"dim": size_cm} if size_cm else {}
+            return self._register_object("group", None, docpr_name, extra)
+
+        # Fallback: drawing generico
+        return self._register_object("unknown", None, docpr_name, {"dim": size_cm} if size_cm else {})
+
+    def _handle_vml_pict(self, pict) -> str:
+        """Analizza un w:pict (VML legacy)."""
+        # Immagine VML: v:imagedata r:id
+        imagedata = pict.find(f".//{{{NS['v']}}}imagedata")
+        if imagedata is not None:
+            rid = imagedata.get(f"{{{NS['r']}}}id")
+            # shape style per dimensioni
+            shape = pict.find(f".//{{{NS['v']}}}shape")
+            dim = None
+            if shape is not None:
+                style = shape.get("style", "")
+                m = re.search(r"width:([\d.]+)pt;height:([\d.]+)pt", style)
+                if m:
+                    w_pt, h_pt = float(m.group(1)), float(m.group(2))
+                    dim = f"{w_pt*0.0353:.2f}×{h_pt*0.0353:.2f} cm"
+            extra = {"dim": dim} if dim else {}
+            return self._register_object("image", rid, None, extra)
+
+        # Forma VML generica
+        shape = pict.find(f".//{{{NS['v']}}}shape")
+        if shape is not None:
+            textbox = shape.find(f".//{{{NS['v']}}}textbox")
+            if textbox is not None:
+                return self._register_object("textbox", None, shape.get("id"))
+            return self._register_object("shape", None, shape.get("id"))
+
+        return self._register_object("unknown", None, None)
+
+    def _handle_ole(self, obj) -> str:
+        """Analizza un w:object (OLE)."""
+        # o:OLEObject r:id + ProgID
+        ole = obj.find(f".//{{{NS['o']}}}OLEObject")
+        prog_id = None
+        rid = None
+        if ole is not None:
+            prog_id = ole.get("ProgID")
+            rid = ole.get(f"{{{NS['r']}}}id")
+
+        # L'anteprima immagine spesso è in v:imagedata
+        imagedata = obj.find(f".//{{{NS['v']}}}imagedata")
+        preview_rid = imagedata.get(f"{{{NS['r']}}}id") if imagedata is not None else None
+
+        extra = {}
+        if prog_id:
+            extra["prog"] = prog_id
+        if preview_rid:
+            extra["preview"] = preview_rid
+
+        return self._register_object("ole", rid, None, extra)
+
+    def _render_objects_summary(self) -> list[str]:
+        """Sezione riassuntiva con tutti gli oggetti rilevati."""
+        if not self._objects_seen:
+            return []
+
+        out: list[str] = ["", "## Oggetti incorporati", ""]
+        by_kind: dict[str, list[dict[str, Any]]] = {}
+        for obj in self._objects_seen:
+            by_kind.setdefault(obj["kind"], []).append(obj)
+
+        kind_labels = {
+            "image": "🖼️ Immagini",
+            "chart": "📊 Grafici",
+            "diagram": "🧩 Diagrammi SmartArt",
+            "shape": "🔷 Forme",
+            "textbox": "📝 Caselle di testo",
+            "ole": "📦 Oggetti OLE",
+            "video": "🎬 Video",
+            "audio": "🔊 Audio",
+            "group": "🔗 Gruppi di forme",
+            "unknown": "❓ Oggetti non classificati",
+        }
+
+        for kind, objs in by_kind.items():
+            out.append(f"### {kind_labels.get(kind, kind)}")
+            for o in objs:
+                parts = [f"- **{kind}#{o['index']}**"]
+                if o["docPr_name"]:
+                    parts.append(f"nome=\"{o['docPr_name']}\"")
+                if o["media_name"]:
+                    parts.append(f"file=\"{o['media_name']}\"")
+                if o["rid"]:
+                    parts.append(f"r:id={o['rid']}")
+                extra = o.get("extra", {})
+                for k, v in extra.items():
+                    if v not in (None, "", 0):
+                        parts.append(f"{k}={v}")
+                out.append(" ".join(parts))
+            out.append("")
+
+        return out
+
+    # ── Estrazione testo ────────────────────────────────────
+
+    def build_markdown(self) -> str:
+        if not self.doc_xml.exists():
+            raise IOError("File document.xml non trovato nel DOCX.")
+
+        try:
+            tree = ET.parse(self.doc_xml)
+        except ET.ParseError as exc:
+            raise IOError(f"document.xml non valido: {exc}") from exc
+
+        body = _find(tree.getroot(), "w:body")
+        if body is None:
+            return "*Documento vuoto.*\n"
+
+        md: list[str] = []
+        md.append(self._render_metadata())
+
+        md.extend(self._walk_body(body))
+        md.append("")
+
+        md.extend(self._render_sections_summary())
+        md.extend(self._render_objects_summary())
+        md.extend(self._render_footnotes_section())
+        md.extend(self._render_endnotes_section())
+
+        return "\n".join(md).strip() + "\n"
+
+    def _render_metadata(self) -> str:
+        author = self.core_props.get("author", "Sconosciuto")
+        title = self.core_props.get("title", "")
+        lines = [f"# {author} - elaborato"]
+        if title:
+            lines.append("")
+            lines.append(f"**Titolo:** {title}")
+        if self.core_props.get("subject"):
+            lines.append(f"**Oggetto:** {self.core_props['subject']}")
+        if self.core_props.get("created"):
+            lines.append(f"**Creato:** {self.core_props['created']}")
+        if self.core_props.get("modified"):
+            lines.append(f"**Modificato:** {self.core_props['modified']}")
+        lines.append("")
+        return "\n".join(lines)
+
+    # ── Walk del body ───────────────────────────────────────
+
+    def _walk_body(self, body) -> list[str]:
+        out: list[str] = []
+        for child in body:
+            tag = child.tag
+            if tag == _q("w:p"):
+                out.extend(self._render_paragraph(child))
+            elif tag == _q("w:tbl"):
+                out.append(self._render_table(child))
+            elif tag == _q("w:sdt"):
+                out.extend(self._render_sdt(child))
+            elif tag == _q("w:sectPr"):
+                props = self._extract_section_props(child)
+                if props:
+                    self._section_index += 1
+                    self._section_props_seen.append(props)
+                    out.append("")
+                    out.append(self._format_section_marker(props, self._section_index))
+                    out.append("")
+        return out
+
+    def _render_sdt(self, sdt) -> list[str]:
+        out: list[str] = []
+
+        is_toc = False
+        gallery = sdt.find(
+            f"{{{NS['w']}}}sdtPr/"
+            f"{{{NS['w']}}}docPartObj/"
+            f"{{{NS['w']}}}docPartGallery"
+        )
+        if gallery is not None:
+            val = gallery.get(_q("w:val"), "")
+            if "table of contents" in val.lower():
+                is_toc = True
+
+        if is_toc:
+            self._toc_index += 1
+            out.append("")
+            out.append(f"## Sommario {self._toc_index}")
+            out.append("")
+
+        content = _find(sdt, "w:sdtContent")
+        if content is not None:
+            out.extend(self._walk_body(content))
+        return out
+
+    # ── Paragrafo ───────────────────────────────────────────
+
+    def _style_name(self, p) -> str:
+        ppr = _find(p, "w:pPr")
+        if ppr is None:
+            return ""
+        ps = _find(ppr, "w:pStyle")
+        if ps is None:
+            return ""
+        sid = ps.get(_q("w:val"), "")
+        info = self.styles.get(sid)
+        return info["name"] if info else sid
+
+    def _list_info(self, p) -> tuple[str, int, str, int] | None:
+        ppr = _find(p, "w:pPr")
+        if ppr is None:
+            return None
+        numpr = _find(ppr, "w:numPr")
+        if numpr is None:
+            return None
+        num_id_el = _find(numpr, "w:numId")
+        ilvl_el = _find(numpr, "w:ilvl")
+        if num_id_el is None:
+            return None
+        num_id = num_id_el.get(_q("w:val"), "")
+        ilvl = int(ilvl_el.get(_q("w:val"), "0")) if ilvl_el is not None else 0
+        abstract_id = self.numbering["nums"].get(num_id)
+        if not abstract_id:
+            return None
+        levels = self.numbering["abstracts"].get(abstract_id, {})
+        level = levels.get(str(ilvl), {})
+        start = level.get("start", 1)
+        fmt = level.get("numFmt", "decimal")
+        return (num_id, ilvl, fmt, start)
+
+    def _next_list_number(self, num_id: str, ilvl: int, start: int) -> int:
+        key = (num_id, ilvl)
+        for (nid, lvl) in list(self._list_counters.keys()):
+            if nid == num_id and lvl > ilvl:
+                del self._list_counters[(nid, lvl)]
+
+        current = self._list_counters.get(key)
+        if current is None:
+            current = start
+        else:
+            current += 1
+        self._list_counters[key] = current
+        return current
+
+    def _render_paragraph(self, p) -> list[str]:
+        out: list[str] = []
+        ppr = _find(p, "w:pPr")
+        style = self._style_name(p)
+
+        # Interruzioni di pagina
+        page_breaks = self._count_page_breaks(p)
+        for _ in range(page_breaks):
+            out.append("")
+            out.append("<div style=\"page-break-after: always\"></div>")
+            out.append("")
+
+        # Cambio sezione
+        if ppr is not None:
+            sectPr = _find(ppr, "w:sectPr")
+            if sectPr is not None:
+                props = self._extract_section_props(sectPr)
+                if props:
+                    self._section_index += 1
+                    self._section_props_seen.append(props)
+                    out.append("")
+                    out.append(self._format_section_marker(props, self._section_index))
+                    out.append("")
+
+        heading_map = {
+            "heading 1": "#", "heading 2": "##", "heading 3": "###",
+            "heading 4": "####", "heading 5": "#####", "heading 6": "######",
+        }
+        style_lower = style.lower()
+        is_title = style_lower == "title"
+        is_subtitle = style_lower == "subtitle"
+        heading_prefix = heading_map.get(style_lower)
+
+        text, inline_footnotes = self._render_runs(p)
+        text = self._append_footnote_refs(text, inline_footnotes)
+
+        # Elenco
+        list_info = self._list_info(p)
+        if list_info is not None:
+            num_id, ilvl, fmt, start = list_info
+            indent = "  " * ilvl
+            if fmt == "bullet":
+                line = f"{indent}- {text}"
+            else:
+                n = self._next_list_number(num_id, ilvl, start)
+                line = f"{indent}{n}. {text}"
+            out.append(line)
+            return out
+
+        if is_title and text:
+            out.append(f"# {text}")
+            return out
+        if is_subtitle and text:
+            out.append(f"## {text}")
+            return out
+        if heading_prefix and text:
+            out.append(f"{heading_prefix} {text}")
+            return out
+
+        if text.strip():
+            out.append(text)
+        return out
+
+    def _count_page_breaks(self, p) -> int:
+        return sum(
+            1 for br in _findall(p, "w:br")
+            if br.get(_q("w:type")) == "page"
+        )
+
+    def _append_footnote_refs(self, text: str, refs: list[str]) -> str:
+        for fid in refs:
+            fn = self.footnotes.get(fid)
+            if fn and fn["type"] not in (
+                "separator", "continuationSeparator", "continuationNotice"
+            ):
+                text += f"[^fn{fid}]"
+        return text
+
+    # ── Runs e formattazione inline ─────────────────────────
+
+    def _render_runs(self, p) -> tuple[str, list[str]]:
+        parts: list[str] = []
+        footnote_refs: list[str] = []
+
+        for child in p:
+            tag = child.tag
+            if tag == _q("w:r"):
+                parts.append(self._render_run(child, footnote_refs))
+            elif tag == _q("w:hyperlink"):
+                anchor = child.get(_q("w:anchor"))
+                text = "".join(
+                    self._render_run(r, footnote_refs)
+                    for r in _findall(child, "w:r")
+                )
+                if anchor and text:
+                    parts.append(f"[{text}](#{anchor})")
+                else:
+                    parts.append(text)
+            elif tag == _q("w:fldSimple"):
+                instr = child.get(_q("w:instr"), "")
+                inner = "".join(
+                    self._render_run(r, footnote_refs)
+                    for r in _findall(child, "w:r")
+                )
+                if "PAGEREF" in instr or "PAGE" in instr:
+                    parts.append(f"[{inner}]")
+                else:
+                    parts.append(inner)
+            elif tag in (_q("w:bookmarkStart"), _q("w:bookmarkEnd")):
+                continue
+            elif tag == _q("w:footnoteReference"):
+                fid = child.get(_q("w:id"))
+                if fid and fid not in footnote_refs:
+                    footnote_refs.append(fid)
+            # Oggetti fuori dai run (raro ma possibile)
+            elif tag == _q("w:drawing"):
+                parts.append(self._handle_drawing(child))
+            elif tag == _q("w:pict"):
+                parts.append(self._handle_vml_pict(child))
+            elif tag == _q("w:object"):
+                parts.append(self._handle_ole(child))
+
+        return "".join(parts), footnote_refs
+
+    def _render_run(self, r, footnote_refs: list[str]) -> str:
+        rpr = _find(r, "w:rPr")
+        text = ""
+
+        for child in r:
+            tag = child.tag
+            if tag == _q("w:t"):
+                text += child.text or ""
+            elif tag == _q("w:br"):
+                btype = child.get(_q("w:type"))
+                if btype == "page":
+                    text += "\n\n<div style=\"page-break-after: always\"></div>\n\n"
+                else:
+                    text += "\n"
+            elif tag == _q("w:tab"):
+                text += "\t"
+            elif tag == _q("w:footnoteReference"):
+                fid = child.get(_q("w:id"))
+                if fid and fid not in footnote_refs:
+                    footnote_refs.append(fid)
+            elif tag == _q("w:endnoteReference"):
+                eid = child.get(_q("w:id"))
+                if eid:
+                    text += f"[^en{eid}]"
+            # Oggetti dentro il run
+            elif tag == _q("w:drawing"):
+                text += self._handle_drawing(child)
+            elif tag == _q("w:pict"):
+                text += self._handle_vml_pict(child)
+            elif tag == _q("w:object"):
+                text += self._handle_ole(child)
+            elif tag == f"{{{NS['mc']}}}AlternateContent":
+                text += self._handle_alternate_content(child)
+
+        if not text:
+            return ""
+
+        if rpr is not None:
+            text = self._apply_inline_formatting(text, rpr)
+
+        return text
+
+    def _apply_inline_formatting(self, text: str, rpr) -> str:
+        b = _find(rpr, "w:b")
+        i = _find(rpr, "w:i")
+        u = _find(rpr, "w:u")
+        strike = _find(rpr, "w:strike")
+        vert = _find(rpr, "w:vertAlign")
+
+        if b is not None and b.get(_q("w:val"), "true") not in ("0", "false"):
+            text = f"**{text}**"
+        if i is not None and i.get(_q("w:val"), "true") not in ("0", "false"):
+            text = f"*{text}*"
+        if u is not None and u.get(_q("w:val"), "single") not in ("none", "0"):
+            text = f"<u>{text}</u>"
+        if strike is not None and strike.get(_q("w:val"), "true") not in ("0", "false"):
+            text = f"~~{text}~~"
+        if vert is not None:
+            v = vert.get(_q("w:val"))
+            if v == "superscript":
+                text = f"^{text}^"
+            elif v == "subscript":
+                text = f"~{text}~"
+
+        return text
+
+    # ── Tabelle ─────────────────────────────────────────────
+
+    def _render_table(self, tbl) -> str:
+        rows = _findall(tbl, "w:tr")
+        if not rows:
+            return ""
+
+        md_rows: list[list[str]] = []
+        for tr in rows:
+            cells = _findall(tr, "w:tc")
+            row: list[str] = []
+            for tc in cells:
+                cell_text_parts: list[str] = []
+                for p in _findall(tc, "w:p"):
+                    text, _ = self._render_runs(p)
+                    if text.strip():
+                        cell_text_parts.append(text.strip())
+                row.append("<br>".join(cell_text_parts).replace("|", "\\|"))
+            md_rows.append(row)
+
+        if not md_rows:
+            return ""
+
+        cols = max(len(r) for r in md_rows)
+        for r in md_rows:
+            while len(r) < cols:
+                r.append("")
+
+        lines = [
+            "| " + " | ".join(md_rows[0]) + " |",
+            "| " + " | ".join(["---"] * cols) + " |",
+        ]
+        for r in md_rows[1:]:
+            lines.append("| " + " | ".join(r) + " |")
+        lines.append("")
+        return "\n".join(lines)
+
+    # ── Riepilogo sezioni ──────────────────────────────────
+
+    def _render_sections_summary(self) -> list[str]:
+        out: list[str] = ["", "## Sezioni del documento", ""]
+        if not self._section_props_seen:
+            out.append("*Nessuna informazione di sezione esplicita.*")
+            return out
+
+        for idx, props in enumerate(self._section_props_seen, 1):
+            out.append(f"### Sezione {idx}")
+            if props.get("orientation"):
+                out.append(f"- Orientamento: **{props['orientation']}**")
+            if props.get("width_twips") and props.get("height_twips"):
+                w = props["width_twips"] / 567.0
+                h = props["height_twips"] / 567.0
+                out.append(f"- Dimensioni pagina: {w:.2f} × {h:.2f} cm")
+            if props.get("margins_twips"):
+                m = props["margins_twips"]
+                out.append(
+                    f"- Margini (cm): top={m['top']/567:.2f}, "
+                    f"bottom={m['bottom']/567:.2f}, "
+                    f"left={m['left']/567:.2f}, right={m['right']/567:.2f}"
+                )
+            if props.get("section_type"):
+                out.append(f"- Tipo interruzione: {props['section_type']}")
+            if props.get("header_text"):
+                fname = props.get("header_file", "")
+                out.append(f"- Intestazione ({fname}): \"{props['header_text']}\"")
+            if props.get("footer_text"):
+                fname = props.get("footer_file", "")
+                out.append(f"- Piè di pagina ({fname}): \"{props['footer_text']}\"")
+            out.append("")
+        return out
+
+    # ── Note ───────────────────────────────────────────────
+
+    def _render_footnotes_section(self) -> list[str]:
+        out: list[str] = []
+        visible = {
+            fid: fn for fid, fn in self.footnotes.items()
+            if fn["type"] not in (
+                "separator", "continuationSeparator", "continuationNotice"
+            ) and fn["text"].strip()
+        }
+        if not visible:
+            return out
+        out.append("")
+        out.append("## Note a piè di pagina")
+        out.append("")
+        for fid, fn in sorted(
+            visible.items(), key=lambda x: int(x[0]) if x[0].lstrip("-").isdigit() else 0
+        ):
+            out.append(f"[^fn{fid}]: {fn['text'].strip()}")
+        out.append("")
+        return out
+
+    def _render_endnotes_section(self) -> list[str]:
+        out: list[str] = []
+        visible = {
+            eid: en for eid, en in self.endnotes.items()
+            if en["type"] not in (
+                "separator", "continuationSeparator", "continuationNotice"
+            ) and en["text"].strip()
+        }
+        if not visible:
+            return out
+        out.append("")
+        out.append("## Note di chiusura")
+        out.append("")
+        for eid, en in sorted(
+            visible.items(), key=lambda x: int(x[0]) if x[0].lstrip("-").isdigit() else 0
+        ):
+            out.append(f"[^en{eid}]: {en['text'].strip()}")
+        out.append("")
+        return out
+
+
+# ── Utility ────────────────────────────────────────────────
+
+def _extract_plain_text(el) -> str:
+    """Estrae il testo semplice da un frammento XML (senza formattazione)."""
+    parts: list[str] = []
+    for t in el.iter(_q("w:t")):
+        parts.append(t.text or "")
+    for tab in el.iter(_q("w:tab")):
+        parts.append("\t")
+    for br in el.iter(_q("w:br")):
+        parts.append("\n")
+    return "".join(parts)
+
+
+def _estrae_autore(extract_dir: Path) -> str:
+    """Compatibilità: estrae l'autore da core.xml."""
+    core = extract_dir / "docProps" / "core.xml"
+    if not core.exists():
+        return "Sconosciuto"
+    try:
+        tree = ET.parse(core)
+        root = tree.getroot()
+        for tag in (f"{{{NS['dc']}}}creator", f"{{{NS['cp']}}}author"):
+            el = root.find(tag)
+            if el is not None and el.text:
+                return el.text.strip()
     except Exception:
-        pass  # Ignora errori su header/footer non supportati
-
-    if image_count > 0:
-        md_parts.append(f"\n> [Immagine] ({image_count} immagine/i rilevata/i nel documento)\n")
-
-    md_output = "".join(md_parts)
-
-    # Output minimale ma valido per documenti vuoti
-    if not md_output.strip():
-        md_output = "*Documento Word vuoto o senza contenuti.*\n"
-
-    return md_output
+        pass
+    return "Sconosciuto"
