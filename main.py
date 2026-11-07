@@ -747,4 +747,149 @@ def _elabora_compito_singolo() -> bool:
         print(f"\n[ERRORE] {e}")
         sys.exit(1)
     except Exception as e:
-        print(f"\n[ERRORE] Erro
+        print(f"\n[ERRORE] Errore durante la pipeline: {e}")
+        sys.exit(1)
+
+
+def _elabora_batch() -> None:
+    """Elabora tutti i compiti nella cartella elaborazioni/."""
+    print("=" * 60)
+    print("AiGrader - Modalità Batch")
+    print("=" * 60)
+
+    if not ELABORAZIONI_DIR.exists():
+        print(f"[ERRORE] Cartella {ELABORAZIONI_DIR} non trovata.")
+        sys.exit(1)
+
+    completate = _carica_elaborazioni_completate()
+
+    task_dirs = [d for d in ELABORAZIONI_DIR.iterdir() if d.is_dir()]
+    if not task_dirs:
+        print(f"[ATTENZIONE] Nessuna sottocartella trovata in {ELABORAZIONI_DIR}.")
+        sys.exit(0)
+
+    da_elaborare = [d for d in task_dirs if d.name not in completate]
+    saltate = len(task_dirs) - len(da_elaborare)
+
+    if saltate:
+        print(f"Saltate {saltate} elaborazione/i già completate (report.log).\n")
+
+    if not da_elaborare:
+        print("[INFO] Tutti i compiti sono già stati elaborati.")
+        sys.exit(0)
+
+    print(f"Trovati {len(task_dirs)} compito/i totali, {len(da_elaborare)} da elaborare.\n")
+
+    elaborati = 0
+    for task_dir in da_elaborare:
+        print(f"\n{'#' * 60}")
+        print(f"# Compito: {task_dir.name}")
+        print(f"{'#' * 60}")
+
+        global BASE_DIR, CONSEGNE_DIR, CORREZIONI_DIR, PROMPT_DIR
+        BASE_DIR = task_dir
+        CONSEGNE_DIR = BASE_DIR / "consegne"
+        CORREZIONI_DIR = BASE_DIR / "correzioni"
+        PROMPT_DIR = BASE_DIR / "prompts"
+
+        try:
+            successo = _elabora_compito_singolo()
+            if successo:
+                _registra_elaborazione(task_dir.name)
+                elaborati += 1
+        except FileNotFoundError as e:
+            print(f"[ERRORE] Compito {task_dir.name} saltato: {e}")
+        except Exception as e:
+            print(f"[ERRORE] Compito {task_dir.name} fallito: {e}")
+        finally:
+            TMP_DIR = None
+
+    print(f"\n{'=' * 60}")
+    print(f"Batch completato: {elaborati} compito/i elaborati.")
+    print(f"{'=' * 60}")
+
+
+# --- Argparse ---
+
+def _parse_args() -> argparse.Namespace:
+    """Parsa i parametri da riga di comando."""
+    parser = argparse.ArgumentParser(
+        description="AiGrader - Correzione automatica di compiti scolastici.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Esempi:
+  python main.py "elaborazioni/4RIM - Esercitazione di Google Fogli"  # Compito specifico
+  python main.py --batch                                              # Batch di tutti i compiti
+        """,
+    )
+
+    parser.add_argument(
+        "cartella_compito",
+        type=str,
+        nargs="?",
+        metavar="PERCORSO_CARTELLA",
+        help="Percorso della cartella del compito da elaborare (modalità singolo, default)",
+    )
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Elabora tutti i compiti nella cartella elaborazioni/",
+    )
+
+    return parser.parse_args()
+
+
+def _show_usage_error_and_exit() -> None:
+    """Mostra un messaggio di errore chiaro con usage hints e cartelle disponibili."""
+    print("[ERRORE] Argomento mancante. È necessario specificare una cartella del compito o usare --batch.\n")
+    print("Uso corretto:")
+    print(f'  python main.py "elaborazioni/NOME_CARTELLA"   # modalità singolo compito (default)')
+    print(f"  python main.py --batch                         # modalità batch\n")
+    print(f"Cartelle disponibili in {ELABORAZIONI_DIR}/:")
+    if ELABORAZIONI_DIR.exists():
+        for d in sorted(ELABORAZIONI_DIR.iterdir()):
+            if d.is_dir():
+                print(f"  - elaborazioni/{d.name}")
+    else:
+        print(f"  [ATTENZIONE] Cartella {ELABORAZIONI_DIR} non trovata.")
+    sys.exit(1)
+
+
+# --- Entry point ---
+
+def main() -> None:
+    """Entry point principale."""
+    _verifica_dipendenze()
+    args = _parse_args()
+
+    if args.batch:
+        _elabora_batch()
+        return
+
+    if not args.cartella_compito:
+        _show_usage_error_and_exit()
+
+    compito_path = Path(args.cartella_compito).resolve()
+    if not compito_path.is_dir():
+        print(f"[ERRORE] Percorso '{args.cartella_compito}' non trovato o non è una cartella.\n")
+        if not args.cartella_compito.startswith("elaborazioni"):
+            print(f"[INFO] Suggerimento: usa un percorso relativo, es. elaborazioni/{args.cartella_compito}")
+        print(f"[INFO] Cartelle disponibili in {ELABORAZIONI_DIR}/:")
+        if ELABORAZIONI_DIR.exists():
+            for d in sorted(ELABORAZIONI_DIR.iterdir()):
+                if d.is_dir():
+                    print(f"  - elaborazioni/{d.name}")
+        sys.exit(1)
+
+    global BASE_DIR, CONSEGNE_DIR, CORREZIONI_DIR, PROMPT_DIR
+    BASE_DIR = compito_path
+    CONSEGNE_DIR = BASE_DIR / "consegne"
+    CORREZIONI_DIR = BASE_DIR / "correzioni"
+    PROMPT_DIR = BASE_DIR / "prompts"
+
+    _elabora_compito_singolo()
+    _registra_elaborazione(compito_path.name)
+
+
+if __name__ == "__main__":
+    main()
