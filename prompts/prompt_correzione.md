@@ -49,6 +49,26 @@ Rispondi ESCLUSIVAMENTE in formato Markdown con la seguente struttura:
 [Commento complessivo che riassume punti di forza, aspetti da migliorare e suggerimenti]
 ```
 
+## Scala di ancoraggio (USA QUESTA, non deviare)
+Per ogni criterio, scegli il livello PRIMA di scrivere il commento, 
+poi assegna il punteggio in questo modo FISSO:
+- Eccellente → punteggio massimo del criterio (es. se Max=25, dai 25)
+- Buono       → 80% del massimo, arrotondato all'intero più vicino (Max=25 → 20)
+- Sufficiente → 60% del massimo arrotondato (Max=25 → 15)
+- Insufficiente → 30% del massimo arrotondato (Max=25 → 8)
+
+NON inventare punteggi intermedi. NON scrivere "27/30 perché è quasi eccellente". 
+Se sei indeciso tra due livelli, scegli il più basso e spiega nel commento cosa manca per salire.
+Per ogni criterio, cita UNA frase o un passaggio specifico dell'elaborato che giustifici il livello assegnato. 
+Il commento DEVE contenere la citazione tra virgolette. Se non trovi una citazione che giustifichi un livello alto, assegna un livello più basso.
+
+## Cosa NON valutare
+- Metadati (autore, titolo, data di creazione/modifica)
+- Struttura tecnica del documento (sommari, note a piè di pagina, intestazioni)
+- Segnaposto di immagini, grafici, oggetti OLE: non sono valutabili
+- La formattazione Markdown di per sé (grassetti, heading): valuta il contenuto
+Valuta SOLO il contenuto sostanziale rispetto ai criteri della griglia.
+
 ## Note
 - Sii oggettivo e basati sui fatti
 - I commenti devono essere specifici e riferiti al lavoro effettivo dello studente

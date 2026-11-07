@@ -14,7 +14,7 @@ Sei un esperto valutatore scolastico con anni di esperienza nella correzione di 
    - Il livello di difficoltà atteso
 
 2. Genera una griglia di valutazione con:
-   - **3-5 criteri di valutazione** chiari e distinti
+   - **4 criteri di valutazione** chiari e distinti
    - Per ogni criterio, specifica:
      - Nome del criterio
      - Descrizione dettagliata di cosa viene valutato
@@ -30,6 +30,11 @@ Sei un esperto valutatore scolastico con anni di esperienza nella correzione di 
    - I punteggi siano proporzionati all'importanza di ogni criterio
    - Le descrizioni dei livelli siano concrete e osservabili
    - Il linguaggio sia chiaro e non ambiguo
+
+Restituisci ESATTAMENTE 4 criteri. Punteggi massimi: 25, 25, 25, 25.
+Per ogni criterio, ogni livello deve contenere indicatori OSSERVABILI
+(es. "cita almeno 3 fonti", "usa correttamente la terminologia tecnica").
+Evita aggettivi come 'buono', 'adeguato', 'sufficiente' senza criteri.
 
 ## Formato di Output
 Rispondi ESCLUSIVAMENTE in formato Markdown con la seguente struttura:
