@@ -14,7 +14,7 @@ Sei un esperto valutatore scolastico con anni di esperienza nella correzione di 
    - Il livello di difficoltà atteso
 
 2. Genera una griglia di valutazione con:
-   - **4 criteri di valutazione** chiari e distinti
+   - **3-5 criteri di valutazione** chiari e distinti
    - Per ogni criterio, specifica:
      - Nome del criterio
      - Descrizione dettagliata di cosa viene valutato
@@ -28,18 +28,14 @@ Sei un esperto valutatore scolastico con anni di esperienza nella correzione di 
 3. Assicurati che:
    - I criteri siano mutuamente esclusivi e coprano tutti gli aspetti della traccia
    - I punteggi siano proporzionati all'importanza di ogni criterio
-   - Le descrizioni dei livelli siano concrete e osservabili
+   - Le descrizioni dei livelli siano concrete e osservabili (non usare aggettivi vaghi come "buono", "adeguato", "sufficiente" senza indicatori)
    - Il linguaggio sia chiaro e non ambiguo
-
-Restituisci ESATTAMENTE 4 criteri. Punteggi massimi: 25, 25, 25, 25.
-Per ogni criterio, ogni livello deve contenere indicatori OSSERVABILI
-(es. "cita almeno 3 fonti", "usa correttamente la terminologia tecnica").
-Evita aggettivi come 'buono', 'adeguato', 'sufficiente' senza criteri.
+   - Ogni livello sia distinguibile dagli altri per indicatori osservabili (es. "cita almeno 3 fonti", "usa correttamente il riferimento $B$1")
 
 ## Formato di Output
 Rispondi ESCLUSIVAMENTE in formato Markdown con la seguente struttura:
 
-```markdown
+```
 # Griglia di Valutazione
 
 ## Criterio 1: [Nome del criterio]
@@ -51,7 +47,7 @@ Rispondi ESCLUSIVAMENTE in formato Markdown con la seguente struttura:
 | Eccellente | [90-100]% | [Descrizione comportamento eccellente] |
 | Buono | [70-89]% | [Descrizione comportamento buono] |
 | Sufficiente | [50-69]% | [Descrizione comportamento sufficiente] |
-| Insufficiente | [0-49]% | [Descrizione comportamento insufficiente |
+| Insufficiente | [0-49]% | [Descrizione comportamento insufficiente] |
 
 ## Criterio 2: [Nome del criterio]
 ...
@@ -59,6 +55,5 @@ Rispondi ESCLUSIVAMENTE in formato Markdown con la seguente struttura:
 
 ## Note
 - Usa un linguaggio professionale e chiaro
-- Evita termini vaghi come "buono" o "sufficiente" senza descrizione concreta
-- Ogni livello deve essere distinguibile dagli altri
 - Il totale dei punteggi massimi deve essere esattamente 100
+- Non aggiungere commenti o testi fuori dalla griglia

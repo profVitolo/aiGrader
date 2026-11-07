@@ -75,3 +75,4 @@ Valuta SOLO il contenuto sostanziale rispetto ai criteri della griglia.
 - Il punteggio deve essere coerente con la griglia di valutazione
 - Usa un tono costruttivo e incoraggiante
 - Il punteggio totale deve essere la somma esatta dei punteggi dei criteri
+- La griglia è autoritativa, non modificarla
