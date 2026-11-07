@@ -8,7 +8,8 @@ class Settings:
     LLM_BASE_URL: str = "http://localhost:8080/v1"
     LLM_API_KEY: str = "sk-no-key-required"
     LLM_MODEL: str = "Qwen3.6-35B-A3B-UD-Q4_K_XL_MTP"
-    LLM_TEMPERATURE: float = 0.2
+    LLM_TEMPERATURE: float = 0.0
+    LLM_TOP_P: float = 1.0
 
     # Project paths
     PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
