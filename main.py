@@ -28,8 +28,12 @@ from utils.llm_client import call_llm
 logger = logging.getLogger(__name__)
 
 # --- Costanti ---
+# PROMPT_DIR è ancorata alla CWD di lancio (dove si trovano prompts/, traccia.md, ecc.)
+# e NON cambia né in modalità singolo né in modalità batch.
+PROMPT_DIR = Path("prompts").resolve()
+
+# Queste invece cambiano in base al compito in elaborazione.
 BASE_DIR = Path(".")
-PROMPT_DIR = BASE_DIR / "prompts"
 CONSEGNE_DIR = BASE_DIR / "consegne"
 CORREZIONI_DIR = BASE_DIR / "correzioni"
 ELABORAZIONI_DIR = Path("elaborazioni")
@@ -786,11 +790,10 @@ def _elabora_batch() -> None:
         print(f"# Compito: {task_dir.name}")
         print(f"{'#' * 60}")
 
-        global BASE_DIR, CONSEGNE_DIR, CORREZIONI_DIR, PROMPT_DIR
+        global BASE_DIR, CONSEGNE_DIR, CORREZIONI_DIR
         BASE_DIR = task_dir
         CONSEGNE_DIR = BASE_DIR / "consegne"
         CORREZIONI_DIR = BASE_DIR / "correzioni"
-        PROMPT_DIR = BASE_DIR / "prompts"
 
         try:
             successo = _elabora_compito_singolo()
@@ -881,11 +884,10 @@ def main() -> None:
                     print(f"  - elaborazioni/{d.name}")
         sys.exit(1)
 
-    global BASE_DIR, CONSEGNE_DIR, CORREZIONI_DIR, PROMPT_DIR
+    global BASE_DIR, CONSEGNE_DIR, CORREZIONI_DIR
     BASE_DIR = compito_path
     CONSEGNE_DIR = BASE_DIR / "consegne"
     CORREZIONI_DIR = BASE_DIR / "correzioni"
-    PROMPT_DIR = BASE_DIR / "prompts"
 
     _elabora_compito_singolo()
     _registra_elaborazione(compito_path.name)
