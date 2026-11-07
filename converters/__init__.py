@@ -2,6 +2,43 @@ import importlib
 from config.settings import Settings
 
 
+def get_extension(file_path) -> str:
+    """Restituisce l'estensione 'utile' ai fini della mappa convertitori.
+
+    Es. per 'foo.tar.gz' → '.tar.gz'; per 'foo.xlsx' → '.xlsx';
+    per 'foo.txt' → '.txt' (fallback a Path.suffix).
+    """
+    from pathlib import Path
+    name = Path(file_path).name.lower()
+    # Prima le estensioni più lunghe, per evitare che '.gz' catturi '.tar.gz'
+    for ext in sorted(Settings.CONVERTERS_MAP, key=len, reverse=True):
+        if name.endswith(ext):
+            return ext
+    return Path(file_path).suffix.lower()
+    
+
+def is_supported(file_path) -> bool:
+    """Ritorna True se esiste un convertitore per il file.
+
+    Gestisce correttamente estensioni composte (.tar.gz, .tar.bz2),
+    a differenza di un semplice confronto su Path.suffix.
+
+    Args:
+        file_path: Path o str del file.
+
+    Returns:
+        True se il file è convertibile, False altrimenti.
+    """
+    from pathlib import Path
+    path = Path(file_path)
+    name_lower = path.name.lower()
+
+    # Match diretto per estensioni composte note
+    for ext in Settings.CONVERTERS_MAP:
+        if name_lower.endswith(ext):
+            return True
+    return False
+
 def get_converter(extension: str):
     """
     Carica dinamicamente il convertitore in base all'estensione del file.
