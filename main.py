@@ -21,7 +21,7 @@ import unicodedata
 from pathlib import Path
 
 from config.settings import Settings
-from converters import get_converter
+from converters import get_converter, get_extension, is_supported
 from utils.llm_client import call_llm
 
 # --- Logger per warning di conversione ---
@@ -49,12 +49,71 @@ MAX_DIFF_PAROLE = 1
 
 # --- Funzioni di supporto ---
 
-def _verifica_dipendenze() -> None:
+def _flushed_print(msg):
+    print(msg, flush=True)
+    
+
+def _estrai_punteggi_massimi(griglia_md: str) -> list[int]:
+    """Estrae i punteggi massimi 'X/100' dalle righe 'Punteggio massimo' della griglia.
+
+    Cerca pattern come:
+      - **Punteggio massimo**: 25/100
+      - **Punteggio massimo**: 25
+    """
+    punteggi: list[int] = []
+    pattern = re.compile(
+        r"punteggio\s+massimo\**\s*[:\-]?\s*(\d+)\s*(?:/\s*100)?",
+        re.IGNORECASE,
+    )
+    for m in pattern.finditer(griglia_md):
+        punteggi.append(int(m.group(1)))
+    return punteggi
+    
+
+def _valida_e_scrivi_griglia(griglia_md: str, output_path: Path) -> None:
+    """Scrive la griglia e verifica che i punteggi massimi sommino a 100.
+
+    Se la somma ≠ 100, appende una riga di warning al file (non blocca:
+    la griglia è autoritativa e il docente potrebbe averla voluta così).
+    """
+    punteggi = _estrai_punteggi_massimi(griglia_md)
+    output_path.write_text(griglia_md, encoding="utf-8")
+
+    if not punteggi:
+        logger.warning(
+            "Impossibile estrarre i punteggi massimi dalla griglia: "
+            "nessun pattern 'Punteggio massimo: X/100' trovato."
+        )
+        return
+
+    somma = sum(punteggi)
+    if somma != 100:
+        logger.warning(
+            "La griglia somma %d, non 100 (punteggi: %s). "
+            "Aggiungo warning in coda al file.",
+            somma, punteggi,
+        )
+        with output_path.open("a", encoding="utf-8") as f:
+            f.write(
+                f"\n\n> ⚠️ **ATTENZIONE**: la somma dei punteggi massimi "
+                f"della griglia è {somma}, non 100 "
+                f"(punteggi rilevati: {', '.join(map(str, punteggi))}). "
+                f"Verificare la griglia fornita.\n"
+            )
+    else:
+        logger.info("Griglia valida: somma punteggi = 100 (%s).", punteggi)
+
+
+def _verifica_dipendenze() -> list[tuple[str, str]]:
     """Verifica che i moduli Python richiesti siano installati.
 
     Controlla la disponibilità di: openpyxl, openai, aspose.words.
-    Per ogni modulo mancante, stampa un warning con le istruzioni di installazione.
-    Non interrompe l'esecuzione se un modulo è mancante.
+    Stampa un warning con le istruzioni di installazione per ogni modulo
+    mancante e restituisce la lista dei mancanti.
+
+    Returns:
+        Lista di tuple (pacchetto, descrizione) dei moduli mancanti.
+        Lista vuota se tutte le dipendenze sono soddisfatte.
     """
     dipendenze = {
         "openpyxl": ("openpyxl", ".xlsx"),
@@ -62,7 +121,7 @@ def _verifica_dipendenze() -> None:
         "aspose.words": ("aspose-words", ".doc"),
     }
 
-    mancanti = []
+    mancanti: list[tuple[str, str]] = []
     for modulo, (pacchetto, descrizione) in dipendenze.items():
         try:
             __import__(modulo)
@@ -70,15 +129,16 @@ def _verifica_dipendenze() -> None:
             mancanti.append((pacchetto, descrizione))
 
     if mancanti:
-        print("\n" + "=" * 60)
-        print("ATTENZIONE: Dipendenze mancanti rilevate")
-        print("=" * 60)
-        print("Il programma potrebbe non funzionare correttamente.")
-        print("Installa i moduli mancanti con:\n")
+        _flushed_print("\n" + "=" * 60)
+        _flushed_print("ATTENZIONE: Dipendenze mancanti rilevate")
+        _flushed_print("=" * 60)
+        _flushed_print("Installa i moduli mancanti con:\n")
         for pacchetto, descrizione in mancanti:
-            print(f"  - {pacchetto}: pip install {pacchetto}  (per {descrizione})")
-        print("\n")
+            _flushed_print(f"  - {pacchetto}: pip install {pacchetto}  (per {descrizione})")
+        _flushed_print("")
 
+    return mancanti
+    
 
 def _carica_elaborazioni_completate() -> set[str]:
     """Legge report.log e restituisce un set con i nomi delle cartelle già valutate."""
@@ -232,9 +292,7 @@ def _nome_canonico(gruppo: list[str]) -> str:
     return migliore.title()
 
 
-def _raggruppa_file_per_studente(
-    file_paths: list[Path],
-) -> dict[str, list[Path]]:
+def _raggruppa_file_per_studente(file_paths: list[Path]) -> dict[str, list[Path]]:
     """Raggruppa i file per studente gestendo inversioni nome/cognome.
 
     Per ogni file estrae il nome dello studente (parte prima del ' - '),
@@ -329,10 +387,7 @@ def _processa_studente_folder(folder_path: Path) -> tuple[str, str]:
     if not file_paths:
         raise ValueError(f"Cartella vuota: {folder_path}")
 
-    file_supportati = [
-        f for f in file_paths
-        if f.suffix.lower() in Settings.CONVERTERS_MAP
-    ]
+    file_supportati = [f for f in file_paths if is_supported(f)]
 
     nomi_file_visti: dict[str, list[Path]] = {}
     for f in file_supportati:
@@ -374,7 +429,7 @@ def _processa_studente_folder(folder_path: Path) -> tuple[str, str]:
 
         parte_markdown = f"## File: {nome_file_display}\n\n"
 
-        funzione_conversione = get_converter(file_path.suffix)
+        funzione_conversione = get_converter(get_extension(file_path))
         if not funzione_conversione:
             parte_markdown += (
                 f"[Errore nella conversione: Nessun convertitore disponibile "
@@ -431,7 +486,7 @@ def _processa_studente_multi_file(nome_studente: str, file_paths: list[Path]) ->
 
         parte_markdown = f"## File: {nome_file_display}\n\n"
 
-        funzione_conversione = get_converter(file_path.suffix)
+        funzione_conversione = get_converter(get_extension(file_path))
         if not funzione_conversione:
             parte_markdown += (
                 f"[Errore nella conversione: Nessun convertitore disponibile "
@@ -512,7 +567,7 @@ def _trova_allegati_traccia() -> list[Path]:
 
 def _converti_allegato(file_path: Path) -> str:
     """Converte un allegato in markdown usando il convertitore appropriato."""
-    funzione_conversione = get_converter(file_path.suffix)
+    funzione_conversione = get_converter(get_extension(file_path))
     if not funzione_conversione:
         logger.warning("Nessun convertitore disponibile per %s", file_path.name)
         return ""
@@ -525,50 +580,142 @@ def _converti_allegato(file_path: Path) -> str:
 
 
 def _crea_traccia_combinata() -> str:
-    """Crea traccia.md combinato in tmp/ con traccia originale + allegati convertiti."""
+    """Crea traccia.md combinato in tmp/ con traccia originale + allegati convertiti.
+
+    Ogni allegato viene anche salvato in un file di debug separato in tmp/,
+    con nome che include TUTTI i suffissi (es. 'traccia_Verifica.xlsx.md'),
+    così allegati con lo stesso stem ma estensione diversa non si sovrascrivono.
+    Viene inoltre generato 'tmp/allegati_index.md' con l'elenco degli allegati
+    processati, esito e dimensione del markdown prodotto.
+    """
     traccia_originale = (BASE_DIR / "traccia.md").read_text(encoding="utf-8")
     allegati = _trova_allegati_traccia()
 
     if not allegati:
         combined_path = TMP_DIR / "traccia.md"
         combined_path.write_text(traccia_originale, encoding="utf-8")
-        print(f"  -> Salvata traccia.md (senza allegati) in tmp/")
+        _flushed_print(f"  -> Salvata traccia.md (senza allegati) in tmp/")
         return traccia_originale
 
     parti = [traccia_originale]
+    righe_indice: list[str] = [
+        "# Indice allegati traccia",
+        "",
+        "| Allegato | Tipo | Dimensione markdown | Esito | File debug |",
+        "|---|---|---|---|---|",
+    ]
+
+    # Soglia sotto la quale il markdown di un allegato è considerato
+    # "sostanzialmente vuoto" (template senza contenuto, ecc.)
+    SOGLIA_VUOTO = 200  # caratteri
+
     for allegato_path in allegati:
         contenuto_markdown = _converti_allegato(allegato_path)
+        suffix_completo = "".join(allegato_path.suffixes) or ".bin"
+        dump_name = f"traccia_{allegato_path.stem}{suffix_completo}.md"
+
         if contenuto_markdown:
-            parti.append(f"\n\n## Allegato: {allegato_path.name}\n\n{contenuto_markdown}")
-            tmp_output_path = TMP_DIR / f"traccia_{allegato_path.stem}.md"
+            parti.append(
+                f"\n\n## Allegato: {allegato_path.name}\n\n{contenuto_markdown}"
+            )
+            tmp_output_path = TMP_DIR / dump_name
             tmp_output_path.write_text(contenuto_markdown, encoding="utf-8")
-            print(f"     -> Salvato allegato: {tmp_output_path.name}")
+
+            lunghezza = len(contenuto_markdown.strip())
+            if lunghezza < SOGLIA_VUOTO:
+                esito = f"⚠️ quasi vuoto ({lunghezza} char)"
+                _flushed_print(
+                    f"     [ATTENZIONE] Markdown molto corto per "
+                    f"{allegato_path.name} ({lunghezza} char) — "
+                    f"possibile template senza contenuto sostanziale"
+                )
+            else:
+                esito = "ok"
+                _flushed_print(f"     -> Salvato allegato: {dump_name}")
+
+            righe_indice.append(
+                f"| {allegato_path.name} | {suffix_completo} | "
+                f"{lunghezza} char | {esito} | `{dump_name}` |"
+            )
         else:
-            print(f"     [ATTENZIONE] Nessun contenuto estratto da {allegato_path.name}")
+            _flushed_print(
+                f"     [ATTENZIONE] Nessun contenuto estratto da "
+                f"{allegato_path.name}"
+            )
+            righe_indice.append(
+                f"| {allegato_path.name} | {suffix_completo} | "
+                f"0 char | ❌ vuoto | — |"
+            )
 
     contenuto_completo = "\n".join(parti)
     combined_path = TMP_DIR / "traccia.md"
     combined_path.write_text(contenuto_completo, encoding="utf-8")
-    print(f"  -> Salvata traccia.md combinata ({len(allegati)} allegato/i) in tmp/")
-    return contenuto_completo
 
+    indice_path = TMP_DIR / "allegati_index.md"
+    indice_path.write_text("\n".join(righe_indice) + "\n", encoding="utf-8")
+
+    _flushed_print(
+        f"  -> Salvata traccia.md combinata "
+        f"({len(allegati)} allegato/i) in tmp/"
+    )
+    _flushed_print(f"  -> Salvato indice allegati: {indice_path.name}")
+    return contenuto_completo
+    
 
 # --- Pipeline principale ---
 
 def _elabora_griglia() -> str:
-    """Genera la griglia di valutazione dalla traccia e allegati opzionali."""
+    """Genera o normalizza la griglia di valutazione.
+
+    Se nella cartella del compito esiste ``griglia.md``, viene usata come
+    griglia autoritativa del docente e solo normalizzata nel formato standard
+    tramite ``prompt_griglia_custom.md``. Altrimenti si ricade sulla
+    generazione automatica da traccia tramite ``prompt_griglia.md``.
+
+    In entrambi i rami di scrittura la griglia prodotta viene validata con
+    ``_valida_e_scrivi_griglia``: se la somma dei punteggi massimi non è 100,
+    viene appeso un warning in coda al file (senza bloccare la pipeline,
+    perché la griglia del docente è autoritativa).
+    """
     global TMP_DIR
-    print("[1/4] Generazione della griglia di valutazione dalla traccia...")
+
+    griglia_docente_path = BASE_DIR / "griglia.md"
+    griglia_output_path = BASE_DIR / "griglia_valutazione.md"
+
+    # Riusa la griglia già normalizzata, se esiste
+    if griglia_output_path.exists():
+        _flushed_print("[1/4] Griglia esistente trovata, la riuso (cancella il file per rigenerarla).")
+        return griglia_output_path.read_text(encoding="utf-8")
+
+    if griglia_docente_path.exists():
+        _flushed_print("[1/4] Trovata griglia.md del docente: normalizzazione in corso...")
+
+        prompt_custom_tmpl = _carica_prompt("prompt_griglia_custom.md")
+        griglia_docente = griglia_docente_path.read_text(encoding="utf-8")
+        contenuto_traccia = _crea_traccia_combinata()
+
+        griglia_contenuto = call_llm([
+            {"role": "user", "content": prompt_custom_tmpl
+                .replace("{traccia}", contenuto_traccia)
+                .replace("{griglia}", griglia_docente)}
+        ])
+
+        _valida_e_scrivi_griglia(griglia_contenuto, griglia_output_path)
+        _flushed_print("-> Griglia del docente normalizzata.\n")
+        return griglia_contenuto
+
+    # Fallback: generazione automatica dalla traccia
+    _flushed_print("[1/4] Nessuna griglia.md trovata: generazione automatica dalla traccia...")
 
     prompt_griglia_tmpl = _carica_prompt("prompt_griglia.md")
     contenuto_prompt = _crea_traccia_combinata()
 
-    griglia_contenuto = call_llm(
-        [{"role": "user", "content": prompt_griglia_tmpl.replace("{traccia}", contenuto_prompt)}]
-    )
+    griglia_contenuto = call_llm([
+        {"role": "user", "content": prompt_griglia_tmpl.replace("{traccia}", contenuto_prompt)}
+    ])
 
-    (BASE_DIR / "griglia_valutazione.md").write_text(griglia_contenuto, encoding="utf-8")
-    print("-> Griglia generata.\n")
+    _valida_e_scrivi_griglia(griglia_contenuto, griglia_output_path)
+    _flushed_print("-> Griglia generata automaticamente.\n")
     return griglia_contenuto
 
 
@@ -584,13 +731,13 @@ def _elabora_consegne(griglia: str) -> str:
     I nomi "canonici" vengono usati come chiave per il rilevamento dei conflitti
     tra cartelle e file (es. cartella "rossi mario" e file "ROSSI MARIO - 1.docx").
     """
-    print("[2/4] Elaborazione delle consegne degli studenti...")
+    _flushed_print("[2/4] Elaborazione delle consegne degli studenti...")
     prompt_corr_tmpl = _carica_prompt("prompt_correzione.md")
     tutte_le_correzioni_text = ""
     studenti_elaborati = 0
 
     if not CONSEGNE_DIR.exists():
-        print(f"  [ATTENZIONE] Cartella {CONSEGNE_DIR} non trovata.")
+        _flushed_print(f"  [ATTENZIONE] Cartella {CONSEGNE_DIR} non trovata.")
         return ""
 
     # studenti_da_elaborare: nome_canonico → (markdown, origine)
@@ -603,20 +750,20 @@ def _elabora_consegne(griglia: str) -> str:
         if item.is_dir():
             cartelle.append(item)
         elif item.is_file():
-            if item.suffix.lower() not in Settings.CONVERTERS_MAP:
-                print(f"  [SKIP] File non supportato: {item.name}")
+            if not is_supported(item):
+                _flushed_print(f"  [SKIP] File non supportato: {item.name}")
                 continue
             file_singoli.append(item)
 
     for cartella in cartelle:
-        print(f" -> Rilevata cartella studente: {cartella.name}")
+        _flushed_print(f" -> Rilevata cartella studente: {cartella.name}")
         try:
             nome, markdown = _processa_studente_folder(cartella)
         except ValueError as e:
-            print(f"    [ATTENZIONE] Cartella saltata {cartella.name}: {e}")
+            _flushed_print(f"    [ATTENZIONE] Cartella saltata {cartella.name}: {e}")
             continue
         except Exception as e:
-            print(f"    [ERRORE] Errore nella cartella {cartella.name}: {e}")
+            _flushed_print(f"    [ERRORE] Errore nella cartella {cartella.name}: {e}")
             continue
 
         origine = f"cartella:{cartella.name}"
@@ -637,22 +784,22 @@ def _elabora_consegne(griglia: str) -> str:
         else:
             studenti_da_elaborare[nome] = (markdown, origine)
 
-        print(f"    -> Cartella elaborata: {nome}")
+        _flushed_print(f"    -> Cartella elaborata: {nome}")
 
     # 2) File singoli raggruppati per studente
     if file_singoli:
-        print(f" -> Rilevati {len(file_singoli)} file singoli da raggruppare...")
+        _flushed_print(f" -> Rilevati {len(file_singoli)} file singoli da raggruppare...")
         raggruppato = _raggruppa_file_per_studente(file_singoli)
 
         for nome_canonico, paths in raggruppato.items():
-            print(
+            _flushed_print(
                 f" -> Studente: {nome_canonico} "
                 f"({len(paths)} file: {', '.join(p.name for p in paths)})"
             )
             try:
                 markdown = _processa_studente_multi_file(nome_canonico, paths)
             except Exception as e:
-                print(f"    [ERRORE] Impossibile elaborare {nome_canonico}: {e}")
+                _flushed_print(f"    [ERRORE] Impossibile elaborare {nome_canonico}: {e}")
                 continue
 
             origine = f"file:{', '.join(p.name for p in paths)}"
@@ -673,7 +820,7 @@ def _elabora_consegne(griglia: str) -> str:
                 studenti_da_elaborare[nome_canonico] = (markdown, origine)
 
     if not studenti_da_elaborare:
-        print(f"  [ATTENZIONE] Nessuno studente da elaborare in {CONSEGNE_DIR}.")
+        _flushed_print(f"  [ATTENZIONE] Nessuno studente da elaborare in {CONSEGNE_DIR}.")
         return ""
 
     # 3) Correzione LLM per ogni studente
@@ -681,7 +828,7 @@ def _elabora_consegne(griglia: str) -> str:
         nome_file_sicuro = re.sub(r'[^\w\s-]', '', nome_studente).strip().replace(' ', '_')
         tmp_output_path = TMP_DIR / f"consegna_{nome_file_sicuro}.md"
         tmp_output_path.write_text(markdown_contenuto, encoding="utf-8")
-        print(f"    -> Salvato markdown unificato: {tmp_output_path.name}")
+        _flushed_print(f"    -> Salvato markdown unificato: {tmp_output_path.name}")
 
         try:
             prompt_correzione_finale = (
@@ -704,19 +851,19 @@ def _elabora_consegne(griglia: str) -> str:
             studenti_elaborati += 1
 
         except Exception as e:
-            print(f"    [ERRORE] Impossibile correggere {nome_studente}: {e}")
+            _flushed_print(f"    [ERRORE] Impossibile correggere {nome_studente}: {e}")
             continue
 
-    print(f"  -> {studenti_elaborati} studente/i elaborati.\n")
+    _flushed_print(f"  -> {studenti_elaborati} studente/i elaborati.\n")
     return tutte_le_correzioni_text
 
 
 def _genera_riepilogo(tutte_le_correzioni: str) -> None:
     """Genera il riepilogo finale delle valutazioni."""
-    print("[3/4] Generazione del report di riepilogo finale...")
+    _flushed_print("[3/4] Generazione del report di riepilogo finale...")
 
     if not tutte_le_correzioni.strip():
-        print("  [ATTENZIONE] Nessuna correzione da riepilogare.")
+        _flushed_print("  [ATTENZIONE] Nessuna correzione da riepilogare.")
         return
 
     prompt_riepilogo_tmpl = _carica_prompt("prompt_riepilogo.md")
@@ -728,15 +875,21 @@ def _genera_riepilogo(tutte_le_correzioni: str) -> None:
     )
 
     (BASE_DIR / "riepilogo.md").write_text(riepilogo_contenuto, encoding="utf-8")
-    print("[4/4] Pipeline completata con successo!\n")
+    _flushed_print("[4/4] Pipeline completata con successo!\n")
 
 
 def _elabora_compito_singolo() -> bool:
-    """Elabora un singolo compito nella working directory."""
+    """Elabora un singolo compito nella working directory.
+
+    Returns:
+        True se la pipeline è completata con successo, False altrimenti.
+        Non chiama sys.exit(): la decisione di uscire è lasciata al chiamante
+        (in modalità batch un fallimento non deve terminare il batch).
+    """
     global TMP_DIR
-    print("=" * 60)
-    print("AiGrader - Modalità Compito Singolo")
-    print("=" * 60)
+    _flushed_print("=" * 60)
+    _flushed_print("AiGrader - Modalità Compito Singolo")
+    _flushed_print("=" * 60)
 
     CORREZIONI_DIR.mkdir(exist_ok=True)
     TMP_DIR = BASE_DIR / "tmp"
@@ -748,49 +901,51 @@ def _elabora_compito_singolo() -> bool:
         _genera_riepilogo(tutte_le_correzioni)
         return True
     except FileNotFoundError as e:
-        print(f"\n[ERRORE] {e}")
-        sys.exit(1)
+        _flushed_print(f"\n[ERRORE] {e}")
+        return False
     except Exception as e:
-        print(f"\n[ERRORE] Errore durante la pipeline: {e}")
-        sys.exit(1)
-
+        _flushed_print(f"\n[ERRORE] Errore durante la pipeline: {e}")
+        return False
+        
 
 def _elabora_batch() -> None:
     """Elabora tutti i compiti nella cartella elaborazioni/."""
-    print("=" * 60)
-    print("AiGrader - Modalità Batch")
-    print("=" * 60)
+    global BASE_DIR, CONSEGNE_DIR, CORREZIONI_DIR, TMP_DIR
+
+    _flushed_print("=" * 60)
+    _flushed_print("AiGrader - Modalità Batch")
+    _flushed_print("=" * 60)
 
     if not ELABORAZIONI_DIR.exists():
-        print(f"[ERRORE] Cartella {ELABORAZIONI_DIR} non trovata.")
+        _flushed_print(f"[ERRORE] Cartella {ELABORAZIONI_DIR} non trovata.")
         sys.exit(1)
 
     completate = _carica_elaborazioni_completate()
 
     task_dirs = [d for d in ELABORAZIONI_DIR.iterdir() if d.is_dir()]
     if not task_dirs:
-        print(f"[ATTENZIONE] Nessuna sottocartella trovata in {ELABORAZIONI_DIR}.")
+        _flushed_print(f"[ATTENZIONE] Nessuna sottocartella trovata in {ELABORAZIONI_DIR}.")
         sys.exit(0)
 
     da_elaborare = [d for d in task_dirs if d.name not in completate]
     saltate = len(task_dirs) - len(da_elaborare)
 
     if saltate:
-        print(f"Saltate {saltate} elaborazione/i già completate (report.log).\n")
+        _flushed_print(f"Saltate {saltate} elaborazione/i già completate (report.log).\n")
 
     if not da_elaborare:
-        print("[INFO] Tutti i compiti sono già stati elaborati.")
+        _flushed_print("[INFO] Tutti i compiti sono già stati elaborati.")
         sys.exit(0)
 
-    print(f"Trovati {len(task_dirs)} compito/i totali, {len(da_elaborare)} da elaborare.\n")
+    _flushed_print(f"Trovati {len(task_dirs)} compito/i totali, {len(da_elaborare)} da elaborare.\n")
 
     elaborati = 0
+    falliti = 0
     for task_dir in da_elaborare:
-        print(f"\n{'#' * 60}")
-        print(f"# Compito: {task_dir.name}")
-        print(f"{'#' * 60}")
+        _flushed_print(f"\n{'#' * 60}")
+        _flushed_print(f"# Compito: {task_dir.name}")
+        _flushed_print(f"{'#' * 60}")
 
-        global BASE_DIR, CONSEGNE_DIR, CORREZIONI_DIR
         BASE_DIR = task_dir
         CONSEGNE_DIR = BASE_DIR / "consegne"
         CORREZIONI_DIR = BASE_DIR / "correzioni"
@@ -800,16 +955,24 @@ def _elabora_batch() -> None:
             if successo:
                 _registra_elaborazione(task_dir.name)
                 elaborati += 1
-        except FileNotFoundError as e:
-            print(f"[ERRORE] Compito {task_dir.name} saltato: {e}")
+            else:
+                falliti += 1
+                _flushed_print(
+                    f"[ATTENZIONE] Compito {task_dir.name} NON registrato "
+                    f"in report.log (pipeline fallita)."
+                )
+        except KeyboardInterrupt:
+            _flushed_print("\n[INTERROTTO] Batch interrotto dall'utente.")
+            break
         except Exception as e:
-            print(f"[ERRORE] Compito {task_dir.name} fallito: {e}")
+            falliti += 1
+            _flushed_print(f"[ERRORE] Compito {task_dir.name} fallito: {e}")
         finally:
             TMP_DIR = None
 
-    print(f"\n{'=' * 60}")
-    print(f"Batch completato: {elaborati} compito/i elaborati.")
-    print(f"{'=' * 60}")
+    _flushed_print(f"\n{'=' * 60}")
+    _flushed_print(f"Batch completato: {elaborati} elaborati, {falliti} falliti.")
+    _flushed_print(f"{'=' * 60}")
 
 
 # --- Argparse ---
@@ -844,17 +1007,17 @@ Esempi:
 
 def _show_usage_error_and_exit() -> None:
     """Mostra un messaggio di errore chiaro con usage hints e cartelle disponibili."""
-    print("[ERRORE] Argomento mancante. È necessario specificare una cartella del compito o usare --batch.\n")
-    print("Uso corretto:")
-    print(f'  python main.py "elaborazioni/NOME_CARTELLA"   # modalità singolo compito (default)')
-    print(f"  python main.py --batch                         # modalità batch\n")
-    print(f"Cartelle disponibili in {ELABORAZIONI_DIR}/:")
+    _flushed_print("[ERRORE] Argomento mancante. È necessario specificare una cartella del compito o usare --batch.\n")
+    _flushed_print("Uso corretto:")
+    _flushed_print(f'  python main.py "elaborazioni/NOME_CARTELLA"   # modalità singolo compito (default)')
+    _flushed_print(f"  python main.py --batch                         # modalità batch\n")
+    _flushed_print(f"Cartelle disponibili in {ELABORAZIONI_DIR}/:")
     if ELABORAZIONI_DIR.exists():
         for d in sorted(ELABORAZIONI_DIR.iterdir()):
             if d.is_dir():
-                print(f"  - elaborazioni/{d.name}")
+                _flushed_print(f"  - elaborazioni/{d.name}")
     else:
-        print(f"  [ATTENZIONE] Cartella {ELABORAZIONI_DIR} non trovata.")
+        _flushed_print(f"  [ATTENZIONE] Cartella {ELABORAZIONI_DIR} non trovata.")
     sys.exit(1)
 
 
@@ -862,7 +1025,27 @@ def _show_usage_error_and_exit() -> None:
 
 def main() -> None:
     """Entry point principale."""
-    _verifica_dipendenze()
+    mancanti = _verifica_dipendenze()
+
+    # Dipendenze critiche: senza queste la pipeline non può funzionare
+    critiche = {"openai", "openpyxl"}
+    critiche_mancanti = {pkg for pkg, _ in mancanti if pkg in critiche}
+
+    if critiche_mancanti:
+        _flushed_print(
+            f"[ERRORE] Dipendenze critiche mancanti: "
+            f"{', '.join(sorted(critiche_mancanti))}. Impossibile procedere."
+        )
+        sys.exit(1)
+
+    # aspose-words è opzionale: avvisa ma prosegui (i .doc legacy falliranno
+    # con un errore chiaro al momento della conversione)
+    if any(pkg == "aspose-words" for pkg, _ in mancanti):
+        _flushed_print(
+            "[ATTENZIONE] aspose-words non installato: i file .doc legacy "
+            "non potranno essere convertiti. Proseguo comunque.\n"
+        )
+
     args = _parse_args()
 
     if args.batch:
@@ -874,14 +1057,14 @@ def main() -> None:
 
     compito_path = Path(args.cartella_compito).resolve()
     if not compito_path.is_dir():
-        print(f"[ERRORE] Percorso '{args.cartella_compito}' non trovato o non è una cartella.\n")
+        _flushed_print(f"[ERRORE] Percorso '{args.cartella_compito}' non trovato o non è una cartella.\n")
         if not args.cartella_compito.startswith("elaborazioni"):
-            print(f"[INFO] Suggerimento: usa un percorso relativo, es. elaborazioni/{args.cartella_compito}")
-        print(f"[INFO] Cartelle disponibili in {ELABORAZIONI_DIR}/:")
+            _flushed_print(f"[INFO] Suggerimento: usa un percorso relativo, es. elaborazioni/{args.cartella_compito}")
+        _flushed_print(f"[INFO] Cartelle disponibili in {ELABORAZIONI_DIR}/:")
         if ELABORAZIONI_DIR.exists():
             for d in sorted(ELABORAZIONI_DIR.iterdir()):
                 if d.is_dir():
-                    print(f"  - elaborazioni/{d.name}")
+                    _flushed_print(f"  - elaborazioni/{d.name}")
         sys.exit(1)
 
     global BASE_DIR, CONSEGNE_DIR, CORREZIONI_DIR
@@ -889,9 +1072,12 @@ def main() -> None:
     CONSEGNE_DIR = BASE_DIR / "consegne"
     CORREZIONI_DIR = BASE_DIR / "correzioni"
 
-    _elabora_compito_singolo()
-    _registra_elaborazione(compito_path.name)
-
+    successo = _elabora_compito_singolo()
+    if successo:
+        _registra_elaborazione(compito_path.name)
+    else:
+        sys.exit(1)
+        
 
 if __name__ == "__main__":
     main()
