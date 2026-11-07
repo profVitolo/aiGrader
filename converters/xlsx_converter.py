@@ -257,7 +257,7 @@ def _render_pivot_table(pivot: TableDefinition, sheet_data: dict) -> str:
         if first_row is not None and first_col is not None:
             # Cerca di recuperare i dati dalla tabella pivot nel foglio
             # Le celle della pivot sono nell'area definita da location
-            pivot_data = _estraiti_dati_pivot(sheet_data, first_row, first_col, location, pivot)
+            pivot_data = _estrai_dati_pivot(sheet_data, first_row, first_col, location, pivot)
             if pivot_data:
                 lines.append("**Dati:**")
                 lines.append("")
@@ -274,7 +274,7 @@ def _render_pivot_table(pivot: TableDefinition, sheet_data: dict) -> str:
     return "\n".join(lines)
 
 
-def _estraiti_dati_pivot(
+def _estrai_dati_pivot(
     sheet_data: dict,
     start_row: int,
     start_col: int,
@@ -760,7 +760,7 @@ def _rileva_e_renderizza_grafici(sheet: Any, sheet_name: str) -> str | None:
     return "\n".join(md_parts) if md_parts else None
 
 
-def _estraiti_pivot_xml_da_zip(file_path: Path) -> dict[str, dict]:
+def _estrai_pivot_xml_da_zip(file_path: Path) -> dict[str, dict]:
     """Estrae e parsea i file XML delle Pivot Table da un file Excel.
 
     Crea una copia temporanea del file .xlsx con estensione .zip,
@@ -923,11 +923,11 @@ def _parse_pivot_xml(pivot_xml: dict, max_length: int = None) -> str:
     return "\n".join(lines)
 
 
-def _estraiti_dati_pivot_xml(pivot_xml_map: dict[str, dict], max_length: int = None) -> str:
+def _estrai_dati_pivot_xml(pivot_xml_map: dict[str, dict], max_length: int = None) -> str:
     """Renderizza tutte le Pivot Table trovate negli XML in markdown.
 
     Args:
-        pivot_xml_map: Dict restituito da _estraiti_pivot_xml_da_zip.
+        pivot_xml_map: Dict restituito da _estrai_pivot_xml_da_zip.
         max_length: Lunghezza massima in caratteri per l'XML grezzo.
 
     Returns:
@@ -1012,8 +1012,8 @@ def converti(file_path: str | Path) -> str:
         pivot_map = _rileva_pivot_tables(wb_formulas)
 
         # --- Estrae XML Pivot Table dal file .xlsx (copia temporanea .zip) ---
-        pivot_xml_data = _estraiti_pivot_xml_da_zip(file_path)
-        pivot_xml_md = _estraiti_dati_pivot_xml(pivot_xml_data, max_length=Settings().PIVOT_XML_MAX_LENGTH)
+        pivot_xml_data = _estrai_pivot_xml_da_zip(file_path)
+        pivot_xml_md = _estrai_dati_pivot_xml(pivot_xml_data, max_length=Settings().PIVOT_XML_MAX_LENGTH)
 
         md_parts: list[str] = []
 

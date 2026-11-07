@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any
 import xml.etree.ElementTree as ET
 
+from config.settings import Settings
+
 
 # ── Namespace ──────────────────────────────────────────────
 NS = {
@@ -703,7 +705,6 @@ class _DocContext:
         return out
 
     # ── Estrazione testo ────────────────────────────────────
-
     def build_markdown(self) -> str:
         if not self.doc_xml.exists():
             raise IOError("File document.xml non trovato nel DOCX.")
@@ -720,16 +721,35 @@ class _DocContext:
         md: list[str] = []
         md.append(self._render_metadata())
 
-        md.extend(self._walk_body(body))
+        body_lines = self._walk_body(body)
+        md.extend(body_lines)
         md.append("")
+
+        # Contenuto sostanziale = righe del body esclusi marker di sezione
+        # (righe che iniziano con '>' o vuote)
+        sostanziale = [
+            ln for ln in body_lines
+            if ln.strip() and not ln.lstrip().startswith(">")
+        ]
+        lunghezza_sostanziale = sum(len(ln.strip()) for ln in sostanziale)
 
         md.extend(self._render_sections_summary())
         md.extend(self._render_objects_summary())
         md.extend(self._render_footnotes_section())
         md.extend(self._render_endnotes_section())
 
-        return "\n".join(md).strip() + "\n"
+        SOGLIA_CONTENUTO = Settings.DOCX_MIN_CONTENT_CHARS
+        if lunghezza_sostanziale < SOGLIA_CONTENUTO:
+            md.insert(
+                1,
+                "\n> ⚠️ **Documento senza contenuto testuale sostanziale** "
+                f"({lunghezza_sostanziale} caratteri di testo rilevati). "
+                "Probabile template vuoto da compilare: non valutabile "
+                "come elaborato.\n",
+            )
 
+        return "\n".join(md).strip() + "\n"
+    
     def _render_metadata(self) -> str:
         author = self.core_props.get("author", "Sconosciuto")
         title = self.core_props.get("title", "")
@@ -1159,19 +1179,3 @@ def _extract_plain_text(el) -> str:
         parts.append("\n")
     return "".join(parts)
 
-
-def _estrae_autore(extract_dir: Path) -> str:
-    """Compatibilità: estrae l'autore da core.xml."""
-    core = extract_dir / "docProps" / "core.xml"
-    if not core.exists():
-        return "Sconosciuto"
-    try:
-        tree = ET.parse(core)
-        root = tree.getroot()
-        for tag in (f"{{{NS['dc']}}}creator", f"{{{NS['cp']}}}author"):
-            el = root.find(tag)
-            if el is not None and el.text:
-                return el.text.strip()
-    except Exception:
-        pass
-    return "Sconosciuto"

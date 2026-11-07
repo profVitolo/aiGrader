@@ -12,9 +12,9 @@ def converti(file_path: str | Path) -> str:
 
     Pipeline:
     1. Carica il file .doc con Aspose.Words
-    2. Lo salva come .docx temporaneo
+    2. Lo salva come .docx temporaneo (in una TemporaryDirectory)
     3. Invoca docx_converter.converti() sul .docx
-    4. Elimina il file temporaneo
+    4. La TemporaryDirectory viene rimossa automaticamente all'uscita dal with
     5. Restituisce il markdown
 
     Args:
@@ -59,21 +59,18 @@ def converti(file_path: str | Path) -> str:
             f"Impossibile aprire il documento Word legacy: {file_path} — {exc}"
         ) from exc
 
-    # Crea file .docx temporaneo nella stessa directory del file originale
-    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False, dir=file_path.parent) as tmp:
-        tmp_path = Path(tmp.name)
+    with tempfile.TemporaryDirectory(prefix="aigrader_doc_") as tmp_dir:
+        tmp_path = Path(tmp_dir) / "convertito.docx"
 
-    try:
-        # Salva come .docx
-        doc.save(str(tmp_path), aw.saving.SaveFormat.AUTO)
+        try:
+            doc.save(str(tmp_path), aw.saving.SaveFormat.AUTO)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Errore nel salvataggio del .docx temporaneo: {exc}"
+            ) from exc
 
-        # Invoca il convertitore docx esistente
         from converters.docx_converter import converti as converti_docx
         md_output = converti_docx(tmp_path)
 
-    finally:
-        # Elimina sempre il file temporaneo
-        if tmp_path.exists():
-            tmp_path.unlink()
-
+    # La TemporaryDirectory è stata rimossa qui
     return md_output

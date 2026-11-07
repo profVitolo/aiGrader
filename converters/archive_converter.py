@@ -11,8 +11,51 @@ import shutil
 from converters import get_converter
 
 
+def _safe_extract_zip(zip_ref: zipfile.ZipFile, extract_dir: Path) -> None:
+    """Estrae uno zip proteggendo da path traversal (zip-slip)."""
+    base = extract_dir.resolve()
+    for member in zip_ref.infolist():
+        target = (extract_dir / member.filename).resolve()
+        if not target.is_relative_to(base):
+            raise ValueError(
+                f"Zip-slip rilevato: membro '{member.filename}' "
+                f"uscirebbe da {extract_dir}"
+            )
+    zip_ref.extractall(extract_dir)
+
+
+def _safe_extract_tar(tar_ref: tarfile.TarFile, extract_dir: Path) -> None:
+    """Estrae un tar proteggendo da path traversal (tar-slip)."""
+    base = extract_dir.resolve()
+    for member in tar_ref.getmembers():
+        target = (extract_dir / member.name).resolve()
+        if not target.is_relative_to(base):
+            raise ValueError(
+                f"Tar-slip rilevato: membro '{member.name}' "
+                f"uscirebbe da {extract_dir}"
+            )
+        # Blocca anche link simbolici/hardlink che puntano fuori
+        if member.issym() or member.islnk():
+            link_target = (extract_dir / member.linkname).resolve()
+            if not link_target.is_relative_to(base):
+                raise ValueError(
+                    f"Link sospetto nell'archivio: '{member.name}' → "
+                    f"'{member.linkname}'"
+                )
+    # Su Python 3.12+ extractall ha filter='data'; su versioni precedenti
+    # la validazione manuale sopra è sufficiente.
+    try:
+        tar_ref.extractall(extract_dir, filter="data")
+    except TypeError:
+        # Python < 3.12: filter non supportato
+        tar_ref.extractall(extract_dir)
+
+
 def _extract_archive(file_path: Path, temp_dir: Path) -> Path:
     """Estrae un archivio in una directory temporanea.
+
+    Il tipo di archivio è determinato dall'estensione COMPLETA (gestisce
+    '.tar.gz', '.tar.bz2', '.tgz'), non dal solo '.suffix'.
 
     Args:
         file_path: Percorso al file archivio.
@@ -23,24 +66,29 @@ def _extract_archive(file_path: Path, temp_dir: Path) -> Path:
     """
     archive_path = Path(file_path)
     extract_dir = temp_dir / archive_path.stem
-
-    # Crea la directory di estrazione
     extract_dir.mkdir(parents=True, exist_ok=True)
 
-    if archive_path.suffix.lower() in ['.zip']:
-        with zipfile.ZipFile(archive_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_dir)
-    elif archive_path.suffix.lower() in ['.tar.gz', '.tgz']:
-        with tarfile.open(archive_path, 'r:gz') as tar_ref:
-            tar_ref.extractall(extract_dir)
-    elif archive_path.suffix.lower() in ['.tar.bz2']:
-        with tarfile.open(archive_path, 'r:bz2') as tar_ref:
-            tar_ref.extractall(extract_dir)
-    elif archive_path.suffix.lower() in ['.tar']:
-        with tarfile.open(archive_path, 'r') as tar_ref:
-            tar_ref.extractall(extract_dir)
+    # Estensione completa in minuscolo (es. '.tar.gz')
+    suffixes = "".join(archive_path.suffixes).lower()
+    name_lower = archive_path.name.lower()
+
+    if suffixes == ".zip" or name_lower.endswith(".zip"):
+        with zipfile.ZipFile(archive_path, "r") as zip_ref:
+            _safe_extract_zip(zip_ref, extract_dir)
+    elif (
+        suffixes in (".tar.gz", ".tgz")
+        or name_lower.endswith((".tar.gz", ".tgz"))
+    ):
+        with tarfile.open(archive_path, "r:gz") as tar_ref:
+            _safe_extract_tar(tar_ref, extract_dir)
+    elif suffixes == ".tar.bz2" or name_lower.endswith(".tar.bz2"):
+        with tarfile.open(archive_path, "r:bz2") as tar_ref:
+            _safe_extract_tar(tar_ref, extract_dir)
+    elif suffixes == ".tar" or name_lower.endswith(".tar"):
+        with tarfile.open(archive_path, "r") as tar_ref:
+            _safe_extract_tar(tar_ref, extract_dir)
     else:
-        raise ValueError(f"Tipo di archivio non supportato: {archive_path.suffix}")
+        raise ValueError(f"Tipo di archivio non supportato: {archive_path.name}")
 
     return extract_dir
 

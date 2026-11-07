@@ -65,27 +65,135 @@ def _get_language_from_extension(extension: str) -> str:
     return language_map.get(extension, "text")
 
 
+def _strip_comments_js(content: str) -> str:
+    """Rimuove commenti // e /* */ da JS/TS rispettando stringhe e template literal."""
+    out: list[str] = []
+    i = 0
+    n = len(content)
+    state = "code"  # code | line_comment | block_comment | single | double | template
+    while i < n:
+        ch = content[i]
+        nxt = content[i + 1] if i + 1 < n else ""
+
+        if state == "code":
+            if ch == "/" and nxt == "/":
+                state = "line_comment"
+                i += 2
+                continue
+            if ch == "/" and nxt == "*":
+                state = "block_comment"
+                i += 2
+                continue
+            if ch == "'":
+                state = "single"
+            elif ch == '"':
+                state = "double"
+            elif ch == "`":
+                state = "template"
+            out.append(ch)
+            i += 1
+            continue
+
+        if state == "line_comment":
+            if ch == "\n":
+                state = "code"
+                out.append(ch)
+            i += 1
+            continue
+
+        if state == "block_comment":
+            if ch == "*" and nxt == "/":
+                state = "code"
+                i += 2
+                continue
+            i += 1
+            continue
+
+        # stati stringa: copia tutto, gestisci escape
+        out.append(ch)
+        if ch == "\\" and i + 1 < n:
+            out.append(content[i + 1])
+            i += 2
+            continue
+        if state == "single" and ch == "'":
+            state = "code"
+        elif state == "double" and ch == '"':
+            state = "code"
+        elif state == "template" and ch == "`":
+            state = "code"
+        i += 1
+
+    return "".join(out)
+
+
+def _strip_comments_css(content: str) -> str:
+    """Rimuove commenti /* */ da CSS rispettando stringhe."""
+    out: list[str] = []
+    i = 0
+    n = len(content)
+    state = "code"
+    while i < n:
+        ch = content[i]
+        nxt = content[i + 1] if i + 1 < n else ""
+
+        if state == "code":
+            if ch == "/" and nxt == "*":
+                state = "block_comment"
+                i += 2
+                continue
+            if ch in ("'", '"'):
+                state = "string"
+                out.append(ch)
+                i += 1
+                continue
+            out.append(ch)
+            i += 1
+            continue
+
+        if state == "block_comment":
+            if ch == "*" and nxt == "/":
+                state = "code"
+                i += 2
+                continue
+            i += 1
+            continue
+
+        # stringa
+        out.append(ch)
+        if ch == "\\" and i + 1 < n:
+            out.append(content[i + 1])
+            i += 2
+            continue
+        if ch in ("'", '"'):
+            state = "code"
+        i += 1
+
+    return "".join(out)
+
+
+def _strip_comments_html(content: str) -> str:
+    """Rimuove commenti <!-- --> da HTML (non gestisce <pre>/<script>/<style>:
+    per un LLM è irrilevante e la rimozione è sicura anche lì)."""
+    return re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL)
+
+
 def _minify_content(content: str, language: str) -> str:
-    """Esegue una minificazione leggera del contenuto."""
+    """Rimuove i commenti dal contenuto, senza alterare la formattazione.
+
+    Non collassa spazi bianchi: la struttura originale aiuta l'LLM a
+    comprendere il codice. Rimuove solo righe vuote multiple consecutive
+    per compattezza.
+    """
     if language == "html":
-        # Rimuovi commenti HTML
-        content = re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL)
-        # Rimuovi spaziature superflue
-        content = re.sub(r"\s+", " ", content)
-        # Rimuovi spazi all'inizio e alla fine delle righe
-        content = re.sub(r"^\s+|\s+$", "", content, flags=re.MULTILINE)
-    elif language in ["css", "javascript", "typescript"]:
-        # Rimuovi commenti CSS/JS/TS
-        if language == "css":
-            content = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
-        else:
-            content = re.sub(r"//.*?$|/\*.*?\*/", "", content, flags=re.MULTILINE | re.DOTALL)
-        # Rimuovi spaziature superflua
-        content = re.sub(r"\s+", " ", content)
-        # Rimuovi spazi all'inizio e alla fine delle righe
-        content = re.sub(r"^\s+|\s+$", "", content, flags=re.MULTILINE)
-    
-    # Rimuovi righe vuote multiple
-    content = re.sub(r"\n\n+", "\n", content)
-    
+        content = _strip_comments_html(content)
+    elif language == "css":
+        content = _strip_comments_css(content)
+    elif language in ("javascript", "typescript"):
+        content = _strip_comments_js(content)
+    else:
+        # linguaggio sconosciuto: nessuna trasformazione
+        return content.strip()
+
+    # Comprimi solo righe vuote multiple, non spazi interni
+    content = re.sub(r"\n\s*\n\s*\n+", "\n\n", content)
     return content.strip()
