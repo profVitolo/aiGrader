@@ -17,6 +17,7 @@ import argparse
 import logging
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 from config.settings import Settings
@@ -34,6 +35,12 @@ CORREZIONI_DIR = BASE_DIR / "correzioni"
 ELABORAZIONI_DIR = Path("elaborazioni")
 REPORT_LOG = ELABORAZIONI_DIR / "report.log"  # Registro delle elaborazioni completate
 TMP_DIR = None  # Cartella tmp per allegati e markdown convertiti (inizializzata per compito)
+
+# Numero minimo di parole perché un nome sia "affidabile" per il matching
+# (evita di unire "Rossi" con "Rossi Mario")
+MIN_PAROLE_NOME = 2
+# Differenza massima di parole ammessa per il match "sottoinsieme"
+MAX_DIFF_PAROLE = 1
 
 
 # --- Funzioni di supporto ---
@@ -78,7 +85,6 @@ def _carica_elaborazioni_completate() -> set[str]:
     with REPORT_LOG.open("r", encoding="utf-8") as f:
         for linea in f:
             linea = linea.strip()
-            # Salta righe vuote e commenti
             if not linea or linea.startswith("#"):
                 continue
             completate.add(linea)
@@ -92,6 +98,8 @@ def _registra_elaborazione(nome_cartella: str) -> None:
         f.write(f"{nome_cartella}\n")
 
 
+# --- Estrazione e raggruppamento nomi studente ---
+
 def _estrai_nome_studente(nome_file: str) -> str:
     """Estrae il nome dello studente dal nome del file.
 
@@ -100,6 +108,10 @@ def _estrai_nome_studente(nome_file: str) -> str:
     - "bianchi luca.docx" → "Bianchi Luca"
 
     Se il file non segue il formato atteso (senza '-'), usa lo stem come nome.
+
+    NOTA: questa funzione è mantenuta per compatibilità e usi puntuali.
+    Il raggruppamento per studente usa _normalizza_nome + _raggruppa_per_studente,
+    che gestiscono in modo robusto anche l'inversione nome/cognome.
     """
     stem = Path(nome_file).stem
     match = re.match(r"^(.*?)\s*-\s*", stem)
@@ -110,58 +122,178 @@ def _estrai_nome_studente(nome_file: str) -> str:
                 "Nome studente vuoto o non valido per file '%s': uso lo stem come fallback",
                 nome_file,
             )
-            # Rimuovi il '-' iniziale prima di usare il fallback
             stem_pulito = stem.lstrip('- ').strip()
             if stem_pulito:
                 return stem_pulito.title()
             return stem.title()
         return nome.title()
-    # File senza '-': usa lo stem come nome studente
     return stem.title()
 
 
-def _raggruppa_file_per_studente(file_paths: list[Path]) -> dict[str, list[Path]]:
-    """Raggruppa i file per studente basandosi sul prefisso del nome.
+def _normalizza_nome(nome: str) -> frozenset[str]:
+    """Normalizza un nome in un insieme di parole minuscole senza accenti.
 
-    Scansiona una lista di Path, estrae il nome studente per ciascun file
-    usando _estrai_nome_studente(), e restituisce un dict che mappa ogni
-    nome studente alla lista dei suoi file.
+    Esempi:
+        "Mario Rossi"       → frozenset({"mario", "rossi"})
+        "ROSSI Mario"       → frozenset({"mario", "rossi"})
+        "De Angelis Marco"  → frozenset({"de", "angelis", "marco"})
+        "Nicolò D'Angelo"   → frozenset({"angelo", "d", "nicolo"})
+    """
+    nome = unicodedata.normalize("NFKD", nome)
+    nome = "".join(c for c in nome if not unicodedata.combining(c))
+    parole = re.findall(r"[a-z]+", nome.lower())
+    return frozenset(parole)
 
-    Supporta formati come:
-    - "rossi mario - a.docx" e "rossi mario - b.xlsx" → stesso gruppo "Rossi Mario"
-    - "bianchi luca.docx" → gruppo "Bianchi Luca" (usa lo stem come nome)
+
+def _stesso_studente(a: frozenset[str], b: frozenset[str]) -> bool:
+    """Determina se due insiemi di parole rappresentano lo stesso studente.
+
+    Regola:
+    - Se gli insiemi sono uguali → stesso studente (es. "Mario Rossi" / "Rossi Mario").
+    - Se uno è sottoinsieme dell'altro e la differenza è al massimo
+      MAX_DIFF_PAROLE → stesso studente, a condizione che il più piccolo
+      abbia almeno MIN_PAROLE_NOME parole.
+      (es. "Mario Rossi" / "Mario Rossi Giuseppe" → stesso studente)
+
+    In tutti gli altri casi → studenti diversi.
+    """
+    if a == b:
+        return True
+
+    piccolo, grande = (a, b) if len(a) <= len(b) else (b, a)
+
+    if len(piccolo) < MIN_PAROLE_NOME:
+        return False
+
+    if not piccolo.issubset(grande):
+        return False
+
+    return (len(grande) - len(piccolo)) <= MAX_DIFF_PAROLE
+
+
+def _raggruppa_per_studente(nomi_originali: list[str]) -> list[list[str]]:
+    """Raggruppa una lista di nomi (grezzi) in cluster di "stesso studente".
+
+    Usa _stesso_studente per costruire un grafo implicito nome→nome e
+    restituisce le componenti connesse (BFS). Questo gestisce la transitività:
+    se A~B e B~C, allora A, B e C finiscono nello stesso gruppo.
+
+    Args:
+        nomi_originali: lista di nomi come compaiono nei file (es. "ROSSI Mario").
+
+    Returns:
+        Lista di gruppi; ogni gruppo è una lista di nomi originali.
+    """
+    normalizzati: dict[str, frozenset[str]] = {
+        n: _normalizza_nome(n) for n in nomi_originali
+    }
+
+    visitati: set[str] = set()
+    gruppi: list[list[str]] = []
+
+    for nome in nomi_originali:
+        if nome in visitati:
+            continue
+
+        gruppo: list[str] = [nome]
+        visitati.add(nome)
+        coda: list[str] = [nome]
+
+        while coda:
+            corrente = coda.pop()
+            for altro in nomi_originali:
+                if altro in visitati:
+                    continue
+                if _stesso_studente(normalizzati[corrente], normalizzati[altro]):
+                    gruppo.append(altro)
+                    visitati.add(altro)
+                    coda.append(altro)
+
+        gruppi.append(gruppo)
+
+    return gruppi
+
+
+def _nome_canonico(gruppo: list[str]) -> str:
+    """Sceglie il nome canonico di un gruppo di nomi equivalenti.
+
+    Criterio: più parole vince; a parità, nome più lungo; a parità, primo
+    incontrato. Il risultato è in Title Case.
+    """
+    def chiave(nome: str):
+        parole = _normalizza_nome(nome)
+        return (len(parole), len(nome))
+
+    migliore = max(gruppo, key=chiave)
+    return migliore.title()
+
+
+def _raggruppa_file_per_studente(
+    file_paths: list[Path],
+) -> dict[str, list[Path]]:
+    """Raggruppa i file per studente gestendo inversioni nome/cognome.
+
+    Per ogni file estrae il nome dello studente (parte prima del ' - '),
+    normalizza il nome in un insieme di parole e unisce i file che
+    rappresentano lo stesso studente (vedi _stesso_studente).
+
+    Il nome restituito come chiave è il "nome canonico" del gruppo
+    (vedi _nome_canonico), non necessariamente quello del primo file.
 
     Args:
         file_paths: Lista di Path dei file degli studenti.
 
     Returns:
-        Dict che mappa il nome dello studente (str) alla lista dei suoi file (Path).
+        Dict che mappa il nome canonico dello studente alla lista dei suoi file.
     """
-    raggruppato: dict[str, list[Path]] = {}
+    # Estrai il nome "grezzo" da ciascun file
+    grezzi_per_file: list[tuple[Path, str]] = []
+    for fp in file_paths:
+        nome = _estrai_nome_studente(fp.name)
+        grezzi_per_file.append((fp, nome))
 
-    for file_path in file_paths:
-        nome_studente = _estrai_nome_studente(file_path.name)
-        if nome_studente not in raggruppato:
-            raggruppato[nome_studente] = []
-        raggruppato[nome_studente].append(file_path)
+    nomi_unici = sorted({n for _, n in grezzi_per_file})
+    gruppi = _raggruppa_per_studente(nomi_unici)
+
+    # Mappa nome_grezzo → nome_canonico del suo gruppo
+    mappa_nomi: dict[str, str] = {}
+    for gruppo in gruppi:
+        canonico = _nome_canonico(gruppo)
+        for n in gruppo:
+            mappa_nomi[n] = canonico
+
+        # Log: se il gruppo contiene nomi non identici dopo normalizzazione
+        normalizzati_gruppo = {n: _normalizza_nome(n) for n in gruppo}
+        if len(set(normalizzati_gruppo.values())) > 1:
+            logger.warning(
+                "Raggruppati nomi considerati equivalenti: %s → canonico '%s'",
+                " | ".join(sorted(gruppo)),
+                canonico,
+            )
+
+    # Costruisci il risultato
+    raggruppato: dict[str, list[Path]] = {}
+    for fp, nome in grezzi_per_file:
+        canonico = mappa_nomi[nome]
+        raggruppato.setdefault(canonico, []).append(fp)
 
     return raggruppato
 
+
+# --- Elaborazione cartelle e file ---
 
 def _processa_studente_folder(folder_path: Path) -> tuple[str, str]:
     """Processa una cartella studente in modo ricorsivo.
 
     Scansiona tutti i file nella cartella (e sottocartelle), converte ciascun
     file supportato, e restituisce un markdown unificato. Il nome studente
-    è estratto dal nome della cartella.
+    è estratto dal nome della cartella e normalizzato.
 
     Args:
         folder_path: Percorso della cartella dello studente.
 
     Returns:
-        Tuple (nome_studente, markdown_contenuto) dove nome_studente è il
-        nome della cartella in title case e markdown_contenuto è il contenuto
-        markdown unificato di tutti i file convertiti.
+        Tuple (nome_studente, markdown_contenuto).
 
     Raises:
         ValueError: Se la cartella non esiste, è vuota o non contiene file
@@ -173,41 +305,41 @@ def _processa_studente_folder(folder_path: Path) -> tuple[str, str]:
     if not folder_path.is_dir():
         raise ValueError(f"Percorso non è una cartella: {folder_path}")
 
-    # Estrai il nome studente dal nome della cartella
-    nome_studente = folder_path.name.title()
+    # Nome canonico: title case, con normalizzazione minima (lascia che sia
+    # _nome_canonico a fare il lavoro "vero" — qui c'è un solo nome, quindi
+    # il risultato è deterministico)
+    nome_studente = _nome_canonico([folder_path.name])
 
-    # Scansiona ricorsivamente tutti i file
     file_paths = sorted(
         [f for f in folder_path.rglob("*") if f.is_file()],
         key=lambda p: str(p.relative_to(folder_path)).lower(),
     )
 
+    # Escludi file nascosti e temporanei Office
+    file_paths = [
+        f for f in file_paths
+        if not f.name.startswith(".")
+        and not f.name.startswith("~$")
+    ]
+
     if not file_paths:
         raise ValueError(f"Cartella vuota: {folder_path}")
 
-    # Filtra solo i file con estensioni supportate
     file_supportati = [
         f for f in file_paths
         if f.suffix.lower() in Settings.CONVERTERS_MAP
     ]
 
-    # Rileva file duplicati (stesso nome ma percorsi diversi)
     nomi_file_visti: dict[str, list[Path]] = {}
-    file_duplicati: list[Path] = []
     for f in file_supportati:
-        nome_base = f.name
-        if nome_base not in nomi_file_visti:
-            nomi_file_visti[nome_base] = []
-        nomi_file_visti[nome_base].append(f)
+        nomi_file_visti.setdefault(f.name, []).append(f)
 
     for nome, paths in nomi_file_visti.items():
         if len(paths) > 1:
-            # File duplicati: usa il percorso completo come identificatore
-            file_duplicati.extend(paths)
             logger.warning(
                 "File duplicati rilevati in %s: %s",
                 folder_path.name,
-                ", ".join(p.name for p in paths),
+                ", ".join(str(p.relative_to(folder_path)) for p in paths),
             )
 
     if not file_supportati:
@@ -216,33 +348,34 @@ def _processa_studente_folder(folder_path: Path) -> tuple[str, str]:
             f"Estensioni supportate: {', '.join(Settings.CONVERTERS_MAP.keys())}"
         )
 
-    # Costruisci il markdown
     parti: list[str] = [f"# Consegna di {nome_studente}\n"]
-
-    # Tieni traccia dei nomi file usati per evitare duplicati
     nomi_file_usati: set[str] = set()
 
     for file_path in file_supportati:
-        # Calcola il percorso relativo dalla cartella studente
         percorso_rel = file_path.relative_to(folder_path)
         nome_file_display = str(percorso_rel)
 
-        # Gestisci file duplicati: se il nome è già usato, aggiungi il percorso
         if nome_file_display in nomi_file_usati:
-            # Usa il percorso completo come identificatore
-            nome_file_display = str(file_path)
+            # Rende univoco il display aggiungendo un contatore
+            contatore = 2
+            base = nome_file_display
+            while nome_file_display in nomi_file_usati:
+                nome_file_display = f"{base} (copia {contatore})"
+                contatore += 1
             logger.info(
-                "File duplicato rilevato, uso percorso completo: %s",
+                "File duplicato rilevato, display univoco: %s",
                 nome_file_display,
             )
         nomi_file_usati.add(nome_file_display)
 
         parte_markdown = f"## File: {nome_file_display}\n\n"
 
-        # Cerca convertitore per l'estensione
         funzione_conversione = get_converter(file_path.suffix)
         if not funzione_conversione:
-            parte_markdown += f"[Errore nella conversione: Nessun convertitore disponibile per {file_path.suffix}]\n"
+            parte_markdown += (
+                f"[Errore nella conversione: Nessun convertitore disponibile "
+                f"per {file_path.suffix}]\n"
+            )
             parti.append(parte_markdown)
             continue
 
@@ -263,36 +396,30 @@ def _processa_studente_folder(folder_path: Path) -> tuple[str, str]:
 def _processa_studente_multi_file(nome_studente: str, file_paths: list[Path]) -> str:
     """Processa più file per uno stesso studente e restituisce un markdown unificato.
 
-    Per ogni file nella lista, invoca il convertitore appropriato tramite
-    get_converter() e raccoglie i risultati separandoli con intestazioni
-    '## File: [nome_file]'. Gli errori di conversione sono riportati come
-    '[Errore nella conversione: messaggio]'. I file sono elaborati in ordine
-    alfabetico.
-
     Args:
-        nome_studente: Nome completo dello studente (es. 'Mario Rossi').
+        nome_studente: Nome canonico dello studente (es. 'Mario Rossi').
         file_paths: Lista di Path dei file da convertire.
 
     Returns:
         Markdown unificato con intestazione dello studente e contenuto di
         tutti i file convertiti, separati da intestazioni di file.
     """
-    # Ordina i file in ordine alfabetico per nome
     file_paths_ordinate = sorted(file_paths, key=lambda p: p.name.lower())
 
     parti: list[str] = [f"# Consegna di {nome_studente}\n"]
-
-    # Tieni traccia dei nomi file usati per evitare duplicati
     nomi_file_usati: set[str] = set()
 
     for file_path in file_paths_ordinate:
         nome_file_display = file_path.name
 
-        # Gestisci file duplicati: se il nome è già usato, usa il nome completo
         if nome_file_display in nomi_file_usati:
-            nome_file_display = file_path.name
+            contatore = 2
+            base = nome_file_display
+            while nome_file_display in nomi_file_usati:
+                nome_file_display = f"{base} (copia {contatore})"
+                contatore += 1
             logger.warning(
-                "File duplicato rilevato per %s: %s",
+                "File duplicato rilevato per %s: uso display univoco '%s'",
                 nome_studente,
                 nome_file_display,
             )
@@ -300,10 +427,12 @@ def _processa_studente_multi_file(nome_studente: str, file_paths: list[Path]) ->
 
         parte_markdown = f"## File: {nome_file_display}\n\n"
 
-        # Cerca convertitore per l'estensione
         funzione_conversione = get_converter(file_path.suffix)
         if not funzione_conversione:
-            parte_markdown += f"[Errore nella conversione: Nessun convertitore disponibile per {file_path.suffix}]\n"
+            parte_markdown += (
+                f"[Errore nella conversione: Nessun convertitore disponibile "
+                f"per {file_path.suffix}]\n"
+            )
             parti.append(parte_markdown)
             continue
 
@@ -320,6 +449,8 @@ def _processa_studente_multi_file(nome_studente: str, file_paths: list[Path]) ->
 
     return "\n".join(parti)
 
+
+# --- Prompt e allegati ---
 
 def _carica_prompt(nome_file: str) -> str:
     """Carica un file prompt dalla working directory."""
@@ -340,7 +471,6 @@ def _estrai_riferimenti_allegati_traccia() -> list[str]:
         return []
 
     contenuto = traccia_path.read_text(encoding="utf-8")
-    # Pattern: [[allegato: nomefile.ext]]
     pattern = r"\[\[allegato:\s*([^\]]+)\]\]"
     return re.findall(pattern, contenuto, re.IGNORECASE)
 
@@ -350,24 +480,22 @@ def _trova_allegati_traccia() -> list[Path]:
 
     Cerca in due modi:
     1. File con prefisso 'traccia' e estensioni supportate (.xlsx, .docx, .doc, .html)
-    2. File referenziati esplicitamente in traccia.md con la sintassi [[allegato: nomefile.ext]]
+    2. File referenziati esplicitamente in traccia.md con [[allegato: nomefile.ext]]
 
     Restituisce una lista ordinata e deduplicata di Path.
     """
     allegati_supportati = {".xlsx", ".docx", ".doc", ".html"}
-    allegati: dict[str, Path] = {}  # usa dict per deduplicare per nome
+    allegati: dict[str, Path] = {}
 
     if not BASE_DIR.exists():
         return []
 
-    # 1. Cerca file con prefisso 'traccia'
     for file_path in sorted(BASE_DIR.iterdir()):
         if not file_path.is_file():
             continue
         if file_path.name.lower().startswith("traccia") and file_path.suffix.lower() in allegati_supportati:
             allegati[file_path.name.lower()] = file_path
 
-    # 2. Cerca riferimenti espliciti in traccia.md
     riferimenti = _estrai_riferimenti_allegati_traccia()
     for nome_file in riferimenti:
         nome_file_pulito = nome_file.strip()
@@ -379,10 +507,7 @@ def _trova_allegati_traccia() -> list[Path]:
 
 
 def _converti_allegato(file_path: Path) -> str:
-    """Converte un allegato in markdown usando il convertitore appropriato.
-
-    Restituisce il contenuto markdown o stringa vuota in caso di errore.
-    """
+    """Converte un allegato in markdown usando il convertitore appropriato."""
     funzione_conversione = get_converter(file_path.suffix)
     if not funzione_conversione:
         logger.warning("Nessun convertitore disponibile per %s", file_path.name)
@@ -396,27 +521,21 @@ def _converti_allegato(file_path: Path) -> str:
 
 
 def _crea_traccia_combinata() -> str:
-    """Crea un file traccia.md combinato in tmp/ con traccia originale + allegati convertiti.
-
-    Restituisce il contenuto completo della traccia combinata.
-    """
+    """Crea traccia.md combinato in tmp/ con traccia originale + allegati convertiti."""
     traccia_originale = (BASE_DIR / "traccia.md").read_text(encoding="utf-8")
     allegati = _trova_allegati_traccia()
 
     if not allegati:
-        # Nessun allegato: salva la traccia originale così com'è
         combined_path = TMP_DIR / "traccia.md"
         combined_path.write_text(traccia_originale, encoding="utf-8")
         print(f"  -> Salvata traccia.md (senza allegati) in tmp/")
         return traccia_originale
 
-    # Costruisce il contenuto combinato
     parti = [traccia_originale]
     for allegato_path in allegati:
         contenuto_markdown = _converti_allegato(allegato_path)
         if contenuto_markdown:
             parti.append(f"\n\n## Allegato: {allegato_path.name}\n\n{contenuto_markdown}")
-            # Salva anche il singolo allegato convertito in tmp/
             tmp_output_path = TMP_DIR / f"traccia_{allegato_path.stem}.md"
             tmp_output_path.write_text(contenuto_markdown, encoding="utf-8")
             print(f"     -> Salvato allegato: {tmp_output_path.name}")
@@ -430,18 +549,14 @@ def _crea_traccia_combinata() -> str:
     return contenuto_completo
 
 
-def _elabora_griglia() -> str:
-    """Genera la griglia di valutazione dalla traccia e allegati opzionali.
+# --- Pipeline principale ---
 
-    Crea un file traccia.md combinato in tmp/ con traccia originale + allegati convertiti,
-    poi usa questo contenuto per generare la griglia tramite LLM.
-    """
+def _elabora_griglia() -> str:
+    """Genera la griglia di valutazione dalla traccia e allegati opzionali."""
     global TMP_DIR
     print("[1/4] Generazione della griglia di valutazione dalla traccia...")
 
     prompt_griglia_tmpl = _carica_prompt("prompt_griglia.md")
-
-    # Crea la traccia combinata (traccia + allegati convertiti) in tmp/
     contenuto_prompt = _crea_traccia_combinata()
 
     griglia_contenuto = call_llm(
@@ -454,7 +569,7 @@ def _elabora_griglia() -> str:
 
 
 def _elabora_consegne(griglia: str) -> str:
-    """Elabora tutte le consegne degli studenti (cartelle e/o file) e restituisce il testo concatenato.
+    """Elabora tutte le consegne degli studenti e restituisce il testo concatenato.
 
     Supporta due modalità:
     - Cartelle studente: directory in consegne/ elaborate con _processa_studente_folder()
@@ -462,6 +577,8 @@ def _elabora_consegne(griglia: str) -> str:
       e poi elaborati con _processa_studente_multi_file()
 
     Entrambi i percorsi producono un markdown unificato per studente.
+    I nomi "canonici" vengono usati come chiave per il rilevamento dei conflitti
+    tra cartelle e file (es. cartella "rossi mario" e file "ROSSI MARIO - 1.docx").
     """
     print("[2/4] Elaborazione delle consegne degli studenti...")
     prompt_corr_tmpl = _carica_prompt("prompt_correzione.md")
@@ -472,95 +589,91 @@ def _elabora_consegne(griglia: str) -> str:
         print(f"  [ATTENZIONE] Cartella {CONSEGNE_DIR} non trovata.")
         return ""
 
-    # Raccoglie gli studenti da elaborare: {nome_studente: markdown_contenuto}
-    # Tiene traccia di dove è stato trovato ogni studente per rilevare conflitti
-    studenti_rilevati: dict[str, list[str]] = {}  # {nome: [origine]}
-    studenti_da_elaborare: dict[str, str] = {}
-    file_paths_da_elaborare: list[Path] = []
+    # studenti_da_elaborare: nome_canonico → (markdown, origine)
+    studenti_da_elaborare: dict[str, tuple[str, str]] = {}
 
+    # 1) Cartelle studente
+    cartelle: list[Path] = []
+    file_singoli: list[Path] = []
     for item in CONSEGNE_DIR.iterdir():
         if item.is_dir():
-            # Processa come cartella studente
-            print(f" -> Rilevata cartella studente: {item.name}")
-            try:
-                nome, markdown = _processa_studente_folder(item)
-                origine = f"cartella:{item.name}"
-
-                # Controlla conflitti: stesso nome studente già trovato
-                if nome in studenti_rilevati:
-                    origini_precedenti = "; ".join(studenti_rilevati[nome])
-                    print(
-                        f"    [ATTENZIONE] Conflitto nome studente: '{nome}' già trovato in [{origini_precedenti}]. "
-                        f"Sovrascrivo con {origine}"
-                    )
-                    logger.warning(
-                        "Conflitto nome studente '%s': già presente in [%s], sovrascrivo con %s",
-                        nome,
-                        origini_precedenti,
-                        origine,
-                    )
-                else:
-                    studenti_rilevati[nome] = []
-
-                studenti_rilevati[nome].append(origine)
-                studenti_da_elaborare[nome] = markdown
-                print(f"    -> Cartella elaborata: {nome} ({markdown.count('## File:') + 1} file)")
-            except ValueError as e:
-                print(f"    [ATTENZIONE] Cartella saltata {item.name}: {e}")
-                continue
-            except Exception as e:
-                print(f"    [ERRORE] Errore nella cartella {item.name}: {e}")
-                continue
-
+            cartelle.append(item)
         elif item.is_file():
-            # File: controlla se ha estensione supportata e raccoglilo
             if item.suffix.lower() not in Settings.CONVERTERS_MAP:
                 print(f"  [SKIP] File non supportato: {item.name}")
                 continue
-            file_paths_da_elaborare.append(item)
+            file_singoli.append(item)
 
-    if file_paths_da_elaborare:
-        print(f" -> Rilevati {len(file_paths_da_elaborare)} file da elaborare...")
-        # Raggruppa i file per studente
-        raggruppato = _raggruppa_file_per_studente(file_paths_da_elaborare)
+    for cartella in cartelle:
+        print(f" -> Rilevata cartella studente: {cartella.name}")
+        try:
+            nome, markdown = _processa_studente_folder(cartella)
+        except ValueError as e:
+            print(f"    [ATTENZIONE] Cartella saltata {cartella.name}: {e}")
+            continue
+        except Exception as e:
+            print(f"    [ERRORE] Errore nella cartella {cartella.name}: {e}")
+            continue
 
-        for nome_studente, paths in raggruppato.items():
-            print(f" -> Elaboro studente: {nome_studente} ({len(paths)} file)")
+        origine = f"cartella:{cartella.name}"
+        if nome in studenti_da_elaborare:
+            vecchio_md, vecchia_origine = studenti_da_elaborare[nome]
+            logger.warning(
+                "Conflitto nome studente '%s': già presente da [%s], "
+                "aggiungo contenuto da [%s]",
+                nome,
+                vecchia_origine,
+                origine,
+            )
+            # Concatena: la cartella + i file dello studente sono complementari
+            studenti_da_elaborare[nome] = (
+                vecchio_md + "\n\n" + markdown,
+                f"{vecchia_origine}; {origine}",
+            )
+        else:
+            studenti_da_elaborare[nome] = (markdown, origine)
+
+        print(f"    -> Cartella elaborata: {nome}")
+
+    # 2) File singoli raggruppati per studente
+    if file_singoli:
+        print(f" -> Rilevati {len(file_singoli)} file singoli da raggruppare...")
+        raggruppato = _raggruppa_file_per_studente(file_singoli)
+
+        for nome_canonico, paths in raggruppato.items():
+            print(
+                f" -> Studente: {nome_canonico} "
+                f"({len(paths)} file: {', '.join(p.name for p in paths)})"
+            )
             try:
-                markdown = _processa_studente_multi_file(nome_studente, paths)
-                origine = f"file:{', '.join(p.name for p in paths)}"
-
-                # Controlla conflitti: stesso nome studente già trovato
-                if nome_studente in studenti_rilevati:
-                    origini_precedenti = "; ".join(studenti_rilevati[nome_studente])
-                    print(
-                        f"    [ATTENZIONE] Conflitto nome studente: '{nome_studente}' già trovato in [{origini_precedenti}]. "
-                        f"Sovrascrivo con {origine}"
-                    )
-                    logger.warning(
-                        "Conflitto nome studente '%s': già presente in [%s], sovrascrivo con %s",
-                        nome_studente,
-                        origini_precedenti,
-                        origine,
-                    )
-                else:
-                    studenti_rilevati[nome_studente] = []
-
-                studenti_rilevati[nome_studente].append(origine)
-                studenti_da_elaborare[nome_studente] = markdown
-                print(f"    -> Markdown unificato generato per {nome_studente}")
+                markdown = _processa_studente_multi_file(nome_canonico, paths)
             except Exception as e:
-                print(f"    [ERRORE] Impossibile elaborare {nome_studente}: {e}")
+                print(f"    [ERRORE] Impossibile elaborare {nome_canonico}: {e}")
                 continue
 
+            origine = f"file:{', '.join(p.name for p in paths)}"
+            if nome_canonico in studenti_da_elaborare:
+                vecchio_md, vecchia_origine = studenti_da_elaborare[nome_canonico]
+                logger.warning(
+                    "Conflitto nome studente '%s': già presente da [%s], "
+                    "aggiungo contenuto da [%s]",
+                    nome_canonico,
+                    vecchia_origine,
+                    origine,
+                )
+                studenti_da_elaborare[nome_canonico] = (
+                    vecchio_md + "\n\n" + markdown,
+                    f"{vecchia_origine}; {origine}",
+                )
+            else:
+                studenti_da_elaborare[nome_canonico] = (markdown, origine)
+
     if not studenti_da_elaborare:
-        print(f"  [ATTENZIONE] Nessun studente da elaborare in {CONSEGNE_DIR}.")
+        print(f"  [ATTENZIONE] Nessuno studente da elaborare in {CONSEGNE_DIR}.")
         return ""
 
-    # Elabora tutti gli studenti con i loro markdown unificati
-    for nome_studente, markdown_contenuto in studenti_da_elaborare.items():
-        # Salva il markdown unificato nella cartella tmp
-        # Usa un nome file sicuro (sostituisci spazi e caratteri speciali)
+    # 3) Correzione LLM per ogni studente
+    for nome_studente, (markdown_contenuto, origine) in studenti_da_elaborare.items():
         nome_file_sicuro = re.sub(r'[^\w\s-]', '', nome_studente).strip().replace(' ', '_')
         tmp_output_path = TMP_DIR / f"consegna_{nome_file_sicuro}.md"
         tmp_output_path.write_text(markdown_contenuto, encoding="utf-8")
@@ -578,7 +691,6 @@ def _elabora_consegne(griglia: str) -> str:
                 [{"role": "user", "content": prompt_correzione_finale}]
             )
 
-            # Salva la griglia di correzione
             output_path = CORREZIONI_DIR / f"{nome_studente} - griglia.md"
             output_path.write_text(report_studente, encoding="utf-8")
 
@@ -590,14 +702,6 @@ def _elabora_consegne(griglia: str) -> str:
         except Exception as e:
             print(f"    [ERRORE] Impossibile correggere {nome_studente}: {e}")
             continue
-
-    # Riepilogo conflitti e studenti saltati
-    if studenti_rilevati:
-        conflitti = {n: o for n, o in studenti_rilevati.items() if len(o) > 1}
-        if conflitti:
-            print(f"  [INFO] Conflitti nome studente rilevati: {len(conflitti)}")
-            for nome, origini in conflitti.items():
-                print(f"    - '{nome}': {', '.join(origini)}")
 
     print(f"  -> {studenti_elaborati} studente/i elaborati.\n")
     return tutte_le_correzioni_text
@@ -624,10 +728,7 @@ def _genera_riepilogo(tutte_le_correzioni: str) -> None:
 
 
 def _elabora_compito_singolo() -> bool:
-    """Elabora un singolo compito nella working directory.
-    
-    Restituisce True se la pipeline è completata con successo.
-    """
+    """Elabora un singolo compito nella working directory."""
     global TMP_DIR
     print("=" * 60)
     print("AiGrader - Modalità Compito Singolo")
@@ -646,163 +747,4 @@ def _elabora_compito_singolo() -> bool:
         print(f"\n[ERRORE] {e}")
         sys.exit(1)
     except Exception as e:
-        print(f"\n[ERRORE] Errore durante la pipeline: {e}")
-        sys.exit(1)
-
-
-def _elabora_batch() -> None:
-    """Elabora tutti i compiti nella cartella elaborazioni/."""
-    print("=" * 60)
-    print("AiGrader - Modalità Batch")
-    print("=" * 60)
-
-    if not ELABORAZIONI_DIR.exists():
-        print(f"[ERRORE] Cartella {ELABORAZIONI_DIR} non trovata.")
-        sys.exit(1)
-
-    # Legge le elaborazioni già completate
-    completate = _carica_elaborazioni_completate()
-
-    task_dirs = [d for d in ELABORAZIONI_DIR.iterdir() if d.is_dir()]
-    if not task_dirs:
-        print(f"[ATTENZIONE] Nessuna sottocartella trovata in {ELABORAZIONI_DIR}.")
-        sys.exit(0)
-
-    # Filtra le cartelle già valutate
-    da_elaborare = [d for d in task_dirs if d.name not in completate]
-    saltate = len(task_dirs) - len(da_elaborare)
-
-    if saltate:
-        print(f"Saltate {saltate} elaborazione/i già completate (report.log).\n")
-
-    if not da_elaborare:
-        print("[INFO] Tutti i compiti sono già stati elaborati.")
-        sys.exit(0)
-
-    print(f"Trovati {len(task_dirs)} compito/i totali, {len(da_elaborare)} da elaborare.\n")
-
-    elaborati = 0
-    for task_dir in da_elaborare:
-        print(f"\n{'#' * 60}")
-        print(f"# Compito: {task_dir.name}")
-        print(f"{'#' * 60}")
-
-        # Cambia working directory per questo compito
-        global BASE_DIR, CONSEGNE_DIR, CORREZIONI_DIR
-        BASE_DIR = task_dir
-        CONSEGNE_DIR = BASE_DIR / "consegne"
-        CORREZIONI_DIR = BASE_DIR / "correzioni"
-
-        try:
-            successo = _elabora_compito_singolo()
-            if successo:
-                # Registra la cartella come completata
-                _registra_elaborazione(task_dir.name)
-                elaborati += 1
-        except FileNotFoundError as e:
-            print(f"[ERRORE] Compito {task_dir.name} saltato: {e}")
-        except Exception as e:
-            print(f"[ERRORE] Compito {task_dir.name} fallito: {e}")
-        finally:
-            # Reset TMP_DIR per il prossimo compito
-            TMP_DIR = None
-
-    print(f"\n{'=' * 60}")
-    print(f"Batch completato: {elaborati} compito/i elaborati.")
-    print(f"{'=' * 60}")
-
-
-# --- Argparse ---
-
-def _parse_args() -> argparse.Namespace:
-    """Parsa i parametri da riga di comando.
-    
-    Restituisce un namespace con:
-    - cartella_compito: percorso del compito (modalità singolo, default)
-    - batch: flag per modalità batch
-    """
-    parser = argparse.ArgumentParser(
-        description="AiGrader - Correzione automatica di compiti scolastici.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Esempi:
-  python main.py "elaborazioni/4RIM - Esercitazione di Google Fogli"  # Elaborazione compito specifico (default)
-  python main.py --batch                                              # Elaborazione batch di tutti i compiti
-        """,
-    )
-
-    parser.add_argument(
-        "cartella_compito",
-        type=str,
-        nargs="?",
-        metavar="PERCORSO_CARTELLA",
-        help="Percorso della cartella del compito da elaborare (modalità singolo, default)",
-    )
-    parser.add_argument(
-        "--batch",
-        action="store_true",
-        help="Elabora tutti i compiti nella cartella elaborazioni/",
-    )
-
-    return parser.parse_args()
-
-
-def _show_usage_error_and_exit() -> None:
-    """Mostra un messaggio di errore chiaro con usage hints e cartelle disponibili."""
-    print("[ERRORE] Argomento mancante. È necessario specificare una cartella del compito o usare --batch.\n")
-    print("Uso corretto:")
-    print(f'  python main.py "elaborazioni/NOME_CARTELLA"   # modalità singolo compito (default)')
-    print(f"  python main.py --batch                         # modalità batch\n")
-    print(f"Cartelle disponibili in {ELABORAZIONI_DIR}/:")
-    if ELABORAZIONI_DIR.exists():
-        for d in sorted(ELABORAZIONI_DIR.iterdir()):
-            if d.is_dir():
-                print(f"  - elaborazioni/{d.name}")
-    else:
-        print(f"  [ATTENZIONE] Cartella {ELABORAZIONI_DIR} non trovata.")
-    sys.exit(1)
-
-
-# --- Entry point ---
-
-def main() -> None:
-    """Entry point principale."""
-    _verifica_dipendenze()
-    args = _parse_args()
-
-    # Se --batch è specificato, esegui modalità batch
-    if args.batch:
-        _elabora_batch()
-        return
-
-    # Se non è specificata nessuna cartella, mostra errore con usage hints
-    if not args.cartella_compito:
-        _show_usage_error_and_exit()
-
-    # Il parametro è un percorso relativo alla CWD (es. elaborazioni/4RIM_test)
-    compito_path = Path(args.cartella_compito).resolve()
-    if not compito_path.is_dir():
-        print(f"[ERRORE] Percorso '{args.cartella_compito}' non trovato o non è una cartella.\n")
-        # Suggerisci percorsi se sembra un nome di cartella in elaborazioni/
-        if not args.cartella_compito.startswith("elaborazioni"):
-            print(f"[INFO] Suggerimento: usa un percorso relativo, es. elaborazioni/{args.cartella_compito}")
-        print(f"[INFO] Cartelle disponibili in {ELABORAZIONI_DIR}/:")
-        if ELABORAZIONI_DIR.exists():
-            for d in sorted(ELABORAZIONI_DIR.iterdir()):
-                if d.is_dir():
-                    print(f"  - elaborazioni/{d.name}")
-        sys.exit(1)
-
-    # Cambia BASE_DIR verso la cartella del compito
-    global BASE_DIR, CONSEGNE_DIR, CORREZIONI_DIR
-    BASE_DIR = compito_path
-    CONSEGNE_DIR = BASE_DIR / "consegne"
-    CORREZIONI_DIR = BASE_DIR / "correzioni"
-
-    _elabora_compito_singolo()
-    # Registra l'elaborazione come completata (usa il nome della cartella)
-    _registra_elaborazione(compito_path.name)
-
-
-if __name__ == "__main__":
-    main()
+        print(f"\n[ERRORE] Erro
