@@ -32,6 +32,7 @@ def call_llm(messages: list[dict], model: str = None) -> str:
             model=model,
             messages=messages,
             temperature=Settings.LLM_TEMPERATURE,
+            top_p=Settings.LLM_TOP_P,
         )
         return response.choices[0].message.content
     except (APIConnectionError, APITimeoutError) as e:
