@@ -11,11 +11,11 @@ class Settings:
     LLM_TEMPERATURE: float = 0.0
     LLM_TOP_P: float = 1.0
 
-    # Project paths
-    PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
-
     # Pivot Table XML rendering
     PIVOT_XML_MAX_LENGTH: int = 10000  # Max chars for raw XML in pivot table output
+
+    # Soglia sotto la quale un docx è considerato "template vuoto" (Fase 3)
+    DOCX_MIN_CONTENT_CHARS: int = 100
 
     # Converter mapping (extension -> module path)
     CONVERTERS_MAP: dict[str, str] = {
