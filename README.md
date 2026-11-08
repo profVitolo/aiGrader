@@ -1,185 +1,135 @@
 # AiGrader
 
-Correzione automatica di compiti scolastici tramite modello LLM locale.
-
-## Panoramica
-
-AiGrader è un tool Python modulare che automatizza la valutazione di prove scolastiche. Accetta in input tracce di compiti (in markdown) e consegne degli studenti (in xlsx, docx, html), genera una griglia di valutazione tramite LLM, corregge ogni elaborato individualmente e produce un riepilogo finale con punteggi e statistiche.
+AiGrader è un tool Python modulare che automatizza la valutazione di prove scolastiche. Accetta in input tracce di compiti (in markdown) e consegne degli studenti (in xlsx, docx, html), genera una griglia di valutazione tramite LLM, corregge ogni elaborato individualmente e produce un riepilogo finale.
 
 ## Requisiti
 
 - **Python 3.10+**
 - **Server LLM locale** (es. Ollama, LM Studio, vLLM) compatibile con l'API OpenAI
-- Dipendenze: `openai`, `openpyxl`, `python-docx`, `beautifulsoup4`
+- Dipendenze elencate in `requirements.txt`
 
 ## Installazione
 
 ```bash
-# Clona il repository
 git clone <repository-url>
 cd AiGrader
-
-# Crea un ambiente virtuale (raccomandato)
 python -m venv venv
-source venv/bin/activate  # Linux/macOS
-# venv\Scripts\activate   # Windows
-
-# Installa le dipendenze
+source venv/bin/activate  # venv\Scripts\activate su Windows
 pip install -r requirements.txt
-# oppure
-pip install -e .
 ```
 
 ## Configurazione
 
-La configurazione è centralizzata in `config/settings.py`. I valori di default sono:
-
-```python
-LLM_BASE_URL = "http://localhost:8080/v1"   # URL del server LLM
-LLM_API_KEY = "sk-no-key-required"           # Chiave API (se necessaria)
-LLM_MODEL = "Qwen3.6-35B-A3B-UD-Q4_K_XL_MTP"  # Modello da usare
-LLM_TEMPERATURE = 0.2                         # Temperatura di generazione
-```
-
-Modifica questi valori in base al tuo setup LLM.
+La configurazione è centralizzata in `config/settings.py`. È possibile modificare i parametri del modello (LLM_MODEL), l'URL del server (LLM_BASE_URL) e altre impostazioni di rendering.
 
 ## Utilizzo
 
-### Modalità Compito Singolo
+AiGrader supporta l'elaborazione di un singolo compito o l'esecuzione in batch su tutta la cartella `elaborazioni/`.
 
-Elabora un singolo compito nella working directory corrente:
+### Modalità di funzionamento
+
+#### Modalità singolo compito
 
 ```bash
-python main.py --singolo
+python main.py "elaborazioni/NomeCompito"
 ```
 
-### Modalità Batch
+La pipeline parte dalla cartella del compito indicata come argomento: elabora la `traccia.md`, genera (o normalizza) la griglia di valutazione, converte ed elabora le consegne presenti in `consegne/` e scrive le correzioni in `correzioni/`.
 
-Elabora tutti i compiti nella cartella `elaborazioni/`:
+#### Modalità batch
 
 ```bash
 python main.py --batch
 ```
 
-### Mostra aiuto
+Elabora automaticamente tutte le sottocartelle di `elaborazioni/` una per una. Le cartelle già completate vengono saltate tramite il registro `elaborazioni/report.log`.
+
+### Tag disponibili in input (CLI)
+
+AiGrader accetta i seguenti tag come argomenti da riga di comando:
+
+| Tag | Tipo | Descrizione |
+|---|---|---|
+| `<PERCORSO_CARTELLA>` | argomento posizione (opzionale) | Percorso della cartella del compito da elaborare (modalità singolo, default) |
+| `--batch` | flag booleano | Elabora tutti i compiti nella cartella `elaborazioni/` |
+| `--clear` | flag booleano | Rilancia l'elaborazione anche dei compiti già completati, pulendo correzioni precedenti (`correzioni/`, `tmp/`, `griglia_valutazione.md`, `riepilogo.md`) |
+| `--help` | flag booleano | Mostra l'help con esempi d'uso |
+
+Esempi d'uso:
 
 ```bash
-python main.py --help
+python main.py                                  # senza argomenti → mostra usage error
+python main.py --help                           # mostra aiuto
+python main.py "elaborazioni/4RIM - Verifica pratica di laboratorio_ Google Sheets e Google Docs"  # singolo
+python main.py --batch                         # tutti i compiti
+python main.py --batch --clear                # tutti i compiti, incluso ripartire da zero
 ```
 
-## Preparare un Compito
+### Struttura di un Compito
 
-Per ogni compito da correggere, prepara la seguente struttura:
+All'interno di `elaborazioni/`, ogni cartella compito deve contenere il **set minimo di file** che il software si aspetta di trovare:
+
+- **`traccia.md`**: Testo del compito.
+- **`consegne/`**: Cartella contenente i file degli studenti (formati supportati: .xlsx, .docx, .doc, .html). Ogni file deve seguire lo standard `nome_studente - nome_file.ext` (es. `Rossi Mario - bilancio.xlsx`).
+- **`correzioni/`**: Cartella di output generata automaticamente.
+- **`griglia.md`**: Griglia di valutazione fornita dal docente (opzionale; se assente, viene generata automaticamente).
+
+Eventuali allegati della traccia possono essere presenti nella stessa cartella del compito e vengono richiamati tramite la sintassi:
 
 ```
-<nome_compito>/
-├── traccia.md              # Testo del compito da correggere
-├── prompt_griglia.md       # Template per generare la griglia di valutazione
-├── prompt_correzione.md    # Template per correggere le consegne
-├── prompt_riepilogo.md     # Template per il riepilogo finale
-├── consegne/               # Cartella con le consegne degli studenti
-│   ├── rossi mario - bilancio.xlsx
-│   ├── bianchi luca - bilancio.docx
-│   └── nerianna - bilancio.html
-└── correzioni/             # Cartella di output (creata automaticamente)
-    ├── rossi mario - bilancio - griglia.md
-    └── bianchi luca - bilancio - griglia.md
+[[allegato: nome_allegato.ext]]
 ```
 
-### File richiesti
+dove `nome_allegato.ext` è l'estensione del file allegato in un formato supportato dai convertitori (es. `traccia_allegato.xlsx`). Se un allegato è presente, la pipeline lo converte in markdown e lo passa al prompt di correzione come contesto aggiuntivo.
 
-1. **traccia.md** — Il testo del compito assegnato agli studenti
-2. **prompt_griglia.md** — Template per generare la griglia di valutazione (riceve `{traccia}`)
-3. **prompt_correzione.md** — Template per correggere le consegne (riceve `{nome_studente}`, `{griglia}`, `{dati_studente}`)
-4. **prompt_riepilogo.md** — Template per il riepilogo finale (riceve `{tutte_le_correzioni}`)
-5. **consegne/** — Cartella contenente i file degli studenti (formati supportati: xlsx, docx, html)
+*Nota: I prompt di sistema sono gestiti centralmente nella cartella `prompts/`.*
 
-### Formati supportati
+### Flusso di Esecuzione
 
-- **Excel** (.xlsx) — Convertito in tabelle markdown
-- **Word** (.docx) — Convertito in markdown con struttura titoli e tabelle
-- **HTML** (.html, .htm) — Convertito in markdown mantenendo titoli e liste
+1. **Generazione griglia**: Analizza `traccia.md` e genera `griglia_valutazione.md` (tramite `prompts/prompt_griglia.md`), oppure normalizza la griglia fornita dal docente tramite `prompts/prompt_griglia_custom.md`.
+2. **Correzione**: Per ogni studente, converte il file in markdown e applica il prompt di correzione (`prompts/prompt_correzione_*.md`).
+3. **Riepilogo**: Genera il riepilogo finale (`prompts/prompt_riepilogo.md`).
 
-## Flusso di Esecuzione
+## Personalizzazioni tramite i file in `prompts/`
 
-Per ogni compito, AiGrader esegue:
+Tutte le istruzioni che guidano l'LLM sono contenute in file Markdown dedicati, riservati alla cartella `prompts/`. Modificare questi file permette di personalizzare il comportamento di AiGrader **senza toccare il codice**.
 
-1. **Generazione griglia** — Legge `traccia.md` e genera `griglia_valutazione.md` tramite LLM
-2. **Correzione consegne** — Per ogni studente:
-   - Converte il file in markdown
-   - Corregge con LLM usando la griglia
-   - Salva il risultato in `correzioni/`
-3. **Riepilogo** — Genera `riepilogo.md` con punteggi e statistiche
+### Prompt disponibili
 
-## Struttura del Progetto
+| Prompt | Scopo | Placeholder principali |
+|---|---|---|
+| `prompt_griglia.md` | Generazione automatica della griglia di valutazione a partire dalla traccia | `{traccia}` |
+| `prompt_griglia_custom.md` | Normalizzazione della griglia di valutazione fornita dal docente (senza modificarne criteri e punteggi) | `{traccia}`, `{griglia}` |
+| `prompt_correzione_senza_allegati.md` | Correzione di un elaborato senza allegati alla traccia | `{nome_studente}`, `{traccia}`, `{griglia}`, `{dati_studente}` |
+| `prompt_correzione_con_allegati.md` | Correzione di un elaborato con allegati di tipo misto o senza prompt specializzato | `{nome_studente}`, `{traccia}`, `{allegato_originale}`, `{griglia}`, `{dati_studente}` |
+| `prompt_correzione_con_allegati_xlsx.md` | Correzione di un elaborato con allegati in fogli di calcolo (`.xlsx`) | `{nome_studente}`, `{traccia}`, `{allegato_originale}`, `{griglia}`, `{dati_studente}` |
+| `prompt_correzione_con_allegati_docx.md` | Correzione di un elaborato con allegati in documenti di testo (`.docx`, `.doc`) | `{nome_studente}`, `{traccia}`, `{allegato_originale}`, `{griglia}`, `{dati_studente}` |
+| `prompt_riepilogo.md` | Generazione del riepilogo finale delle valutazioni di tutti gli studenti | `{tutte_le_correzioni}` |
+
+### Come personalizzare
+
+- **Griglia**: modificare `prompt_griglia.md` (metodo di generazione automatica) o `prompt_griglia_custom.md` (metodo di normalizzazione della griglia del docente). Cambiare il numero di criteri, i livelli di prestazione, le percentuali di punteggio, il linguaggio.
+- **Correzione**: modificare i quattro prompt di correzione per cambiare scala di ancoraggio, obblighi di citazione, criteri da non valutare, tono. Attenzione: la scala di ancoraggio è condivisa e va mantenuta coerente tra i prompt.
+- **Riepilogo**: modificare `prompt_riepilogo.md` per cambiare le statistiche, il formato delle tabelle e le osservazioni generali.
+
+Per un dettaglio completo su ogni prompt, sui placeholder disponibili e sulle procedure di estensione (es. aggiunta di un nuovo tipo di allegato), si rimanda alla documentazione nella cartella `prompts/` (`prompts/README.md`).
+
+## Formati supportati
+
+- **Excel** (.xlsx) — Convertito in tabelle markdown.
+- **Word** (.docx, .doc) — Convertito in markdown (struttura titoli, tabelle, liste).
+- **Web** (.html, .htm) — Convertito in markdown.
+- **Archivi** (.zip) — Supporto per l'estrazione.
+
+## Struttura del repository
 
 ```
 AiGrader/
-├── main.py                       # Orchestratore principale
-├── config/                       # Configurazione parametrica
-│   ├── __init__.py
-│   └── settings.py
-├── prompts/                      # Template prompt per LLM
-│   ├── prompt_griglia.md
-│   ├── prompt_correzione.md
-│   └── prompt_riepilogo.md
-├── utils/                        # Utility LLM e health check
-│   ├── __init__.py
-│   └── llm_client.py
-├── converters/                   # Convertitori formato → markdown
-│   ├── __init__.py
-│   ├── xlsx_converter.py
-│   ├── docx_converter.py
-│   └── web_converter.py
-├── elaborazioni/                 # Contenitore compiti
-│   └── <nome_compito>/
-│       ├── traccia.md
-│       ├── griglia_valutazione.md
-│       ├── riepilogo.md
-│       ├── consegne/
-│       └── correzioni/
-├── requirements.txt              # Dipendenze Python
-├── pyproject.toml                # Metadati progetto
-└── README.md                     # Questo file
+├── main.py               # Script orchestratore principale
+├── config/               # Configurazione parametrica globale (settings.py)
+├── converters/           # Moduli di conversione file → markdown
+├── prompts/              # Template di prompt con placeholder
+├── utils/                # Connessione LLM e health check
+├── elaborazioni/         # Compiti in elaborazione (una cartella per compito)
+└── README.md
 ```
-
-## Esempio Completo
-
-```bash
-# 1. Preparare il compito
-mkdir -p elaborazioni/bilancio-2024/consegne
-cp traccia.md elaborazioni/bilancio-2024/
-cp prompts/*.md elaborazioni/bilancio-2024/
-cp studenti/*.xlsx elaborazioni/bilancio-2024/consegne/
-
-# 2. Eseguire la correzione
-python main.py --batch
-```
-
-## Prompt Templates
-
-I template prompt definiscono il comportamento del LLM. Ecco una panoramica:
-
-### prompt_griglia.md
-Genera una griglia di valutazione strutturata con criteri, punteggi e livelli di prestazione.
-
-### prompt_correzione.md
-Corregge il lavoro di uno studente producendo un report con punteggio per criterio, totale e commenti.
-
-### prompt_riepilogo.md
-Genera un riepilogo con lista studenti, punteggi individuali e statistiche (media, massimo, minimo).
-
-## Note
-
-- Il nome dello studente viene estratto dal nome del file (es. "rossi mario - bilancio.xlsx" → "Rossi Mario")
-- La griglia di valutazione è generata una sola volta e condivisa per tutti gli studenti dello stesso compito
-- Ogni studente riceve una correzione individuale salvata in `correzioni/`
-- File non supportati nella cartella `consegne/` vengono saltati con un messaggio di avviso
-
-## Documentazione Completa
-
-Per le specifiche tecniche dettagliate, consulta [SPECIFICATION.md](SPECIFICATION.md).
-
-## Licenza
-
-Progetto educativo per la correzione automatica di compiti scolastici.
