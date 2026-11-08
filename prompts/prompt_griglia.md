@@ -20,10 +20,10 @@ Sei un esperto valutatore scolastico con anni di esperienza nella correzione di 
      - Descrizione dettagliata di cosa viene valutato
      - Punteggio massimo assegnabile (il totale deve essere 100)
      - Livelli di prestazione con descrizioni:
-       - **Eccellente** (90-100% del punteggio del criterio)
-       - **Buono** (70-89% del punteggio del criterio)
-       - **Sufficiente** (50-69% del punteggio del criterio)
-       - **Insufficiente** (0-49% del punteggio del criterio)
+		- **Eccellente** (90-100% del punteggio del criterio)
+		- **Buono** (70-89% del punteggio del criterio)
+		- **Sufficiente** (50-69% del punteggio del criterio)
+		- **Insufficiente** (30-49% del punteggio del criterio)
 
 3. Assicurati che:
    - I criteri siano mutuamente esclusivi e coprano tutti gli aspetti della traccia
@@ -47,7 +47,7 @@ Rispondi ESCLUSIVAMENTE in formato Markdown con la seguente struttura:
 | Eccellente | [90-100]% | [Descrizione comportamento eccellente] |
 | Buono | [70-89]% | [Descrizione comportamento buono] |
 | Sufficiente | [50-69]% | [Descrizione comportamento sufficiente] |
-| Insufficiente | [0-49]% | [Descrizione comportamento insufficiente] |
+| Insufficiente | [30-49]% | [Descrizione comportamento insufficiente] |
 
 ## Criterio 2: [Nome del criterio]
 ...

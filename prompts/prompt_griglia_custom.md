@@ -41,7 +41,7 @@ Rispondi ESCLUSIVAMENTE in formato Markdown con la seguente struttura, un blocco
 | Eccellente | 90-100% | [Descrizione di una frase] |
 | Buono | 70-89% | [Descrizione di una frase] |
 | Sufficiente | 50-69% | [Descrizione di una frase] |
-| Insufficiente | 0-49% | [Descrizione di una frase] |
+| Insufficiente | 30-49% | [Descrizione di una frase] |
 
 ## Criterio 2: [Nome identico a quello del docente]
 ...
