@@ -24,7 +24,8 @@ Sei un esperto valutatore scolastico con anni di esperienza nella correzione di 
 		- **Buono** (70-89% del punteggio del criterio)
 		- **Sufficiente** (50-69% del punteggio del criterio)
 		- **Insufficiente** (30-49% del punteggio del criterio)
-
+	 - Per ogni criterio, il punteggio minimo assegnabile è il **30% del punteggio massimo**, arrotondato all'intero più vicino. La griglia deve essere compatibile con questa regola: anche un criterio completamente non svolto riceve almeno il 30% del suo massimo. Il punteggio totale minimo è quindi circa 30/100.
+	 
 3. Assicurati che:
    - I criteri siano mutuamente esclusivi e coprano tutti gli aspetti della traccia
    - I punteggi siano proporzionati all'importanza di ogni criterio
@@ -40,6 +41,7 @@ Rispondi ESCLUSIVAMENTE in formato Markdown con la seguente struttura:
 
 ## Criterio 1: [Nome del criterio]
 - **Punteggio massimo**: [X/100]
+- **Punteggio minimo**: [ceil(0.3*X)/100]
 - **Descrizione**: [Cosa viene valutato]
 
 | Livello | Punteggio | Descrizione |
@@ -57,3 +59,4 @@ Rispondi ESCLUSIVAMENTE in formato Markdown con la seguente struttura:
 - Usa un linguaggio professionale e chiaro
 - Il totale dei punteggi massimi deve essere esattamente 100
 - Non aggiungere commenti o testi fuori dalla griglia
+- La somma dei punteggi minimi dei criteri deve essere 30 (o 31 per effetto degli arrotondamenti). Verifica che il totale dei punteggi massimi sia 100 e che il totale dei punteggi minimi sia circa 30.

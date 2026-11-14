@@ -34,6 +34,7 @@ Rispondi ESCLUSIVAMENTE in formato Markdown con la seguente struttura, un blocco
 
 ## Criterio 1: [Nome identico a quello del docente]
 - **Punteggio massimo**: [X/100 identico a quello del docente]
+- **Punteggio minimo**: [ceil(0.3*X)/100]
 - **Descrizione**: [Descrizione del docente, o una frase se mancava]
 
 | Livello | Punteggio | Descrizione |
@@ -55,3 +56,4 @@ Rispondi ESCLUSIVAMENTE in formato Markdown con la seguente struttura, un blocco
 - Non modificare i punteggi massimi, anche se non sommano 100.
 - Se la griglia del docente è già nel formato standard, restituiscila invariata (a parte l'intestazione `# Griglia di Valutazione`).
 - Non aggiungere commenti fuori dalla griglia.
+- Per ogni criterio, calcola e riporta il **punteggio minimo** come 30% del punteggio massimo, arrotondato all'intero più vicino. Anche se il docente non lo ha indicato, aggiungilo: serve al valutatore per rispettare il minimo di 30/100.

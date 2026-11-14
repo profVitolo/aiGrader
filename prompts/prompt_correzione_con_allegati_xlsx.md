@@ -98,6 +98,7 @@ poi assegna il punteggio in questo modo FISSO:
 NON inventare punteggi intermedi. Se sei indeciso tra due livelli, scegli il più basso e spiega nel commento cosa manca per salire.
 Per ogni criterio, cita UNA cella, formula, foglio o grafico specifico **prodotto dallo studente** (non del template) che giustifichi il livello assegnato.
 Il commento DEVE contenere la citazione. Se non trovi una citazione che giustifichi un livello alto, assegna un livello più basso.
+NON assegnare mai a un criterio un punteggio inferiore al 30% del suo massimo, anche se il criterio è completamente non svolto: in quel caso assegna esattamente il 30% (arrotondato all'intero più vicino) e spiega nel commento che il criterio è assente o gravemente insufficiente. Il punteggio totale non deve scendere sotto 30/100.
 
 ## Cosa NON valutare
 - Metadati del file (autore, data di creazione/modifica)
