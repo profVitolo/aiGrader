@@ -7,7 +7,7 @@ class Settings:
     # LLM Configuration
     LLM_BASE_URL: str = "http://localhost:8080/v1"
     LLM_API_KEY: str = "sk-no-key-required"
-    LLM_MODEL: str = "Q8_8-Qwen3.6-35B-A3B-UD-Q4_K_XL_MTP"  #"Qwen3.6-35B-A3B-UD-Q4_K_XL_MTP"   # "ISTA-DASLab-Qwen3.8-27B-IQ3_XSS-MTP"  # 
+    LLM_MODEL: str =  "ISTA-DASLab-Qwen3.8-27B-IQ2_S-MTP" # "ISTA-DASLab-Qwen3.8-27B-IQ3_XXS-MTP"  # "Qwen3.6-35B-A3B-UD-Q4_K_XL_MTP"   #  "Q8_8-Qwen3.6-35B-A3B-UD-Q4_K_XL_MTP" 
     LLM_TEMPERATURE: float = 0.0
     LLM_TOP_P: float = 1.0
 
@@ -26,6 +26,7 @@ class Settings:
         ".htm": "converters.web_converter",
         ".css": "converters.web_converter",
         ".js": "converters.web_converter",
+        ".txt": "converters.txt_converter",
         # Archivi compressi
         ".zip": "converters.archive_converter",
         ".tar": "converters.archive_converter",

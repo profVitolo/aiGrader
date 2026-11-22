@@ -658,12 +658,12 @@ def _trova_allegati_traccia() -> list[Path]:
     """Trova file allegati alla traccia nella working directory.
 
     Cerca in due modi:
-    1. File con prefisso 'traccia' e estensioni supportate (.xlsx, .docx, .doc, .html)
+    1. File con prefisso 'traccia' e estensioni supportate (.xlsx, .docx, .doc, .html, .txt)
     2. File referenziati esplicitamente in traccia.md con [[allegato: nomefile.ext]]
 
     Restituisce una lista ordinata e deduplicata di Path.
     """
-    allegati_supportati = {".xlsx", ".docx", ".doc", ".html"}
+    allegati_supportati = {".xlsx", ".docx", ".doc", ".html", ".txt"}
     allegati: dict[str, Path] = {}
 
     if not BASE_DIR.exists():
