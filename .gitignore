@@ -231,3 +231,7 @@ elaborazioni/*
 # cache
 __pycache__
 aiGrader/
+
+# not project stuff
+structure.txt
+folder_structure.py
